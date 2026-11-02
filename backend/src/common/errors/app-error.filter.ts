@@ -2,6 +2,7 @@ import { type ArgumentsHost, Catch, type ExceptionFilter, HttpException, Logger 
 import type { ApiErrorBody, ErrorCode } from '@pos/shared';
 import type { Response } from 'express';
 import type { RequestWithContext } from '../request-context.js';
+import { Prisma } from '../../generated/prisma/client.js';
 import { AppError } from './app-error.js';
 
 const STATUS_CODES: Record<number, ErrorCode> = {
@@ -30,6 +31,9 @@ export class AppErrorFilter implements ExceptionFilter {
       status = exception.status;
       body = { code: exception.code, message: exception.message };
       if (exception.details !== undefined) body.details = exception.details;
+    } else if (exception instanceof Prisma.PrismaClientKnownRequestError && exception.code === 'P2002') {
+      status = 409;
+      body = { code: 'CONFLICT', message: 'Already exists' };
     } else if (exception instanceof HttpException) {
       status = exception.getStatus();
       body = { code: STATUS_CODES[status] ?? 'INTERNAL', message: status === 404 ? 'Not found' : exception.message };

@@ -1,0 +1,300 @@
+generator client {
+  provider            = "prisma-client"
+  output              = "../src/generated/prisma"
+  moduleFormat        = "esm"
+  importFileExtension = "js"
+  runtime             = "nodejs"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum TenantStatus {
+  ACTIVE
+  SUSPENDED
+}
+
+enum UserStatus {
+  ACTIVE
+  DISABLED
+}
+
+// ─────────────── Platform tables: no tenantId-based RLS ───────────────
+
+model Plan {
+  id         String   @id @default(uuid(7)) @db.Uuid
+  key        String   @unique
+  name       String
+  maxStores  Int
+  maxDevices Int
+  maxUsers   Int
+  tenants    Tenant[]
+}
+
+model BusinessType {
+  id              String   @id @default(uuid(7)) @db.Uuid
+  key             String   @unique
+  name            String
+  description     String?
+  modules         String[]
+  roleTemplates   Json
+  defaultSettings Json     @default("{}")
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  tenants         Tenant[]
+}
+
+model Tenant {
+  id              String         @id @db.Uuid
+  name            String
+  slug            String         @unique
+  status          TenantStatus   @default(ACTIVE)
+  businessTypeId  String         @db.Uuid
+  planId          String         @db.Uuid
+  country         String
+  currency        String
+  timezone        String
+  settings        Json           @default("{}")
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+  deletedAt       DateTime?
+  businessType    BusinessType   @relation(fields: [businessTypeId], references: [id])
+  plan            Plan           @relation(fields: [planId], references: [id])
+  domains         Domain[]
+  moduleOverrides TenantModule[]
+  stores          Store[]
+  users           User[]
+  roles           Role[]
+}
+
+/// Platform-managed. Has tenantId but is read before any tenant context exists (host resolution).
+model Domain {
+  id                String    @id @default(uuid(7)) @db.Uuid
+  tenantId          String    @db.Uuid
+  hostname          String    @unique
+  verificationToken String
+  verifiedAt        DateTime?
+  lastCheckedAt     DateTime?
+  createdAt         DateTime  @default(now())
+  tenant            Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+}
+
+/// Platform-managed per-tenant module overrides.
+model TenantModule {
+  tenantId  String   @db.Uuid
+  moduleKey String
+  enabled   Boolean
+  updatedAt DateTime @updatedAt
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@id([tenantId, moduleKey])
+}
+
+model SuperAdmin {
+  id                  String                  @id @default(uuid(7)) @db.Uuid
+  email               String                  @unique
+  name                String
+  passwordHash        String?
+  totpSecretEnc       String?
+  totpLastCounter     Int?
+  setupTokenHash      String?                 @unique
+  setupTokenExpiresAt DateTime?
+  failedLoginCount    Int                     @default(0)
+  lockedUntil         DateTime?
+  createdAt           DateTime                @default(now())
+  families            PlatformRefreshFamily[]
+}
+
+model PlatformRefreshFamily {
+  id                String                 @id @default(uuid(7)) @db.Uuid
+  superAdminId      String                 @db.Uuid
+  createdAt         DateTime               @default(now())
+  absoluteExpiresAt DateTime
+  revokedAt         DateTime?
+  superAdmin        SuperAdmin             @relation(fields: [superAdminId], references: [id], onDelete: Cascade)
+  tokens            PlatformRefreshToken[]
+}
+
+model PlatformRefreshToken {
+  id        String                @id @default(uuid(7)) @db.Uuid
+  familyId  String                @db.Uuid
+  tokenHash String                @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  family    PlatformRefreshFamily @relation(fields: [familyId], references: [id], onDelete: Cascade)
+}
+
+model PlatformAuditEvent {
+  id            String   @id @db.Uuid
+  seq           BigInt   @unique @default(autoincrement())
+  actorId       String?  @db.Uuid
+  action        String
+  entityType    String
+  entityId      String?
+  before        Json?
+  after         Json?
+  ip            String?
+  userAgent     String?
+  correlationId String?
+  prevHash      String
+  hash          String
+  createdAt     DateTime
+}
+
+// ─────────────── Tenant-scoped tables: RLS on tenantId ───────────────
+// Relations between tenant-scoped tables use composite (tenantId, id) keys so a row can
+// never reference another tenant's row: Postgres FK checks do not apply RLS.
+
+model Store {
+  id        String     @id @default(uuid(7)) @db.Uuid
+  tenantId  String     @db.Uuid
+  name      String
+  code      String
+  createdAt DateTime   @default(now())
+  tenant    Tenant     @relation(fields: [tenantId], references: [id])
+  registers Register[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, code])
+}
+
+model Register {
+  id          String             @id @default(uuid(7)) @db.Uuid
+  tenantId    String             @db.Uuid
+  storeId     String             @db.Uuid
+  name        String
+  code        String
+  createdAt   DateTime           @default(now())
+  store       Store              @relation(fields: [tenantId, storeId], references: [tenantId, id])
+  devices     Device[]
+  enrollments DeviceEnrollment[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, code])
+}
+
+model User {
+  id                  String          @id @default(uuid(7)) @db.Uuid
+  tenantId            String          @db.Uuid
+  email               String?
+  name                String
+  passwordHash        String?
+  pinHash             String?
+  totpSecretEnc       String?
+  totpLastCounter     Int?
+  setupTokenHash      String?         @unique
+  setupTokenExpiresAt DateTime?
+  status              UserStatus      @default(ACTIVE)
+  failedLoginCount    Int             @default(0)
+  lockedUntil         DateTime?
+  pinFailedCount      Int             @default(0)
+  pinLockedUntil      DateTime?
+  createdAt           DateTime        @default(now())
+  updatedAt           DateTime        @updatedAt
+  tenant              Tenant          @relation(fields: [tenantId], references: [id])
+  roles               UserRole[]
+  families            RefreshFamily[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, email])
+}
+
+model Role {
+  id          String     @id @default(uuid(7)) @db.Uuid
+  tenantId    String     @db.Uuid
+  name        String
+  permissions String[]
+  requiresMfa Boolean    @default(false)
+  isSystem    Boolean    @default(false)
+  createdAt   DateTime   @default(now())
+  tenant      Tenant     @relation(fields: [tenantId], references: [id])
+  users       UserRole[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, name])
+}
+
+model UserRole {
+  tenantId String @db.Uuid
+  userId   String @db.Uuid
+  roleId   String @db.Uuid
+  user     User   @relation(fields: [tenantId, userId], references: [tenantId, id], onDelete: Cascade)
+  role     Role   @relation(fields: [tenantId, roleId], references: [tenantId, id], onDelete: Cascade)
+
+  @@id([userId, roleId])
+}
+
+model Device {
+  id           String    @id @default(uuid(7)) @db.Uuid
+  tenantId     String    @db.Uuid
+  registerId   String    @db.Uuid
+  name         String
+  publicKeyJwk Json
+  enrolledById String    @db.Uuid
+  enrolledAt   DateTime  @default(now())
+  revokedAt    DateTime?
+  register     Register  @relation(fields: [tenantId, registerId], references: [tenantId, id])
+
+  @@unique([tenantId, id])
+}
+
+model DeviceEnrollment {
+  id          String    @id @default(uuid(7)) @db.Uuid
+  tenantId    String    @db.Uuid
+  registerId  String    @db.Uuid
+  codeHash    String
+  createdById String    @db.Uuid
+  expiresAt   DateTime
+  usedAt      DateTime?
+  createdAt   DateTime  @default(now())
+  register    Register  @relation(fields: [tenantId, registerId], references: [tenantId, id])
+
+  @@unique([tenantId, codeHash])
+}
+
+model RefreshFamily {
+  id                String         @id @default(uuid(7)) @db.Uuid
+  tenantId          String         @db.Uuid
+  userId            String         @db.Uuid
+  deviceId          String?        @db.Uuid
+  createdAt         DateTime       @default(now())
+  absoluteExpiresAt DateTime
+  revokedAt         DateTime?
+  user              User           @relation(fields: [tenantId, userId], references: [tenantId, id], onDelete: Cascade)
+  tokens            RefreshToken[]
+
+  @@unique([tenantId, id])
+}
+
+model RefreshToken {
+  id        String        @id @default(uuid(7)) @db.Uuid
+  tenantId  String        @db.Uuid
+  familyId  String        @db.Uuid
+  tokenHash String        @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  family    RefreshFamily @relation(fields: [tenantId, familyId], references: [tenantId, id], onDelete: Cascade)
+}
+
+model AuditEvent {
+  id             String   @id @db.Uuid
+  tenantId       String   @db.Uuid
+  seq            BigInt   @unique @default(autoincrement())
+  actorUserId    String?  @db.Uuid
+  impersonatorId String?  @db.Uuid
+  deviceId       String?  @db.Uuid
+  action         String
+  entityType     String
+  entityId       String?
+  before         Json?
+  after          Json?
+  ip             String?
+  userAgent      String?
+  correlationId  String?
+  prevHash       String
+  hash           String
+  createdAt      DateTime
+
+  @@index([tenantId, seq])
+}
