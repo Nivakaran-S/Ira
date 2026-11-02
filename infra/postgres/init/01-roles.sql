@@ -1,0 +1,22 @@
+-- Runs once, on first container start, as the postgres superuser.
+CREATE ROLE pos_owner LOGIN PASSWORD 'pos_owner_dev' CREATEDB;
+CREATE ROLE pos_app LOGIN PASSWORD 'pos_app_dev' NOBYPASSRLS;
+
+CREATE DATABASE pos OWNER pos_owner;
+CREATE DATABASE pos_test OWNER pos_owner;
+
+\c pos
+ALTER SCHEMA public OWNER TO pos_owner;
+GRANT USAGE ON SCHEMA public TO pos_app;
+ALTER DEFAULT PRIVILEGES FOR ROLE pos_owner IN SCHEMA public
+  GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO pos_app;
+ALTER DEFAULT PRIVILEGES FOR ROLE pos_owner IN SCHEMA public
+  GRANT USAGE, SELECT ON SEQUENCES TO pos_app;
+
+\c pos_test
+ALTER SCHEMA public OWNER TO pos_owner;
+GRANT USAGE ON SCHEMA public TO pos_app;
+ALTER DEFAULT PRIVILEGES FOR ROLE pos_owner IN SCHEMA public
+  GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO pos_app;
+ALTER DEFAULT PRIVILEGES FOR ROLE pos_owner IN SCHEMA public
+  GRANT USAGE, SELECT ON SEQUENCES TO pos_app;

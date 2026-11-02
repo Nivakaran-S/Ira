@@ -7,3 +7,5 @@ dist/
 coverage/
 .angular/
 .superpowers/
+!.env.test
+backend/src/generated/
