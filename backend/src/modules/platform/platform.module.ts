@@ -5,6 +5,8 @@ import { CaddyController } from './caddy.controller.js';
 import { DomainRecheckJob } from './domain-recheck.job.js';
 import { DomainsController } from './domains.controller.js';
 import { DNS_RESOLVER, DomainsService, systemDnsResolver } from './domains.service.js';
+import { ImpersonationController } from './impersonation.controller.js';
+import { ImpersonationService } from './impersonation.service.js';
 import { PlatformAuthController } from './platform-auth.controller.js';
 import { PlatformAuthService } from './platform-auth.service.js';
 import { PlatformSessionService } from './platform-session.service.js';
@@ -21,6 +23,7 @@ import { TenantsService } from './tenants.service.js';
     TenantModulesController,
     DomainsController,
     CaddyController,
+    ImpersonationController,
   ],
   providers: [
     PlatformAuthService,
@@ -30,6 +33,7 @@ import { TenantsService } from './tenants.service.js';
     TenantModulesService,
     DomainsService,
     DomainRecheckJob,
+    ImpersonationService,
     { provide: DNS_RESOLVER, useValue: systemDnsResolver },
   ],
 })
