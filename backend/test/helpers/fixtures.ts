@@ -103,3 +103,16 @@ export async function createUser(tenantId: string, input: UserFixture = {}) {
   await db.userRole.create({ data: { tenantId, userId: user.id, roleId: role.id } });
   return { user, role };
 }
+
+export async function createSuperAdmin(input: { email: string; password?: string; totpSecret?: Buffer; setupCode?: string }) {
+  return ownerDb().superAdmin.create({
+    data: {
+      email: input.email.toLowerCase(),
+      name: 'Platform Admin',
+      passwordHash: input.password ? await passwords.hash(input.password) : null,
+      totpSecretEnc: input.totpSecret ? testAead().encrypt(input.totpSecret.toString('base64')) : null,
+      setupTokenHash: input.setupCode ? sha256Hex(input.setupCode) : null,
+      setupTokenExpiresAt: input.setupCode ? new Date(Date.now() + 3_600_000) : null,
+    },
+  });
+}

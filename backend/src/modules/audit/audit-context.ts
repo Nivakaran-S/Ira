@@ -1,5 +1,5 @@
 import type { RequestWithContext } from '../../common/request-context.js';
-import type { AuditEntry } from './audit.service.js';
+import type { AuditEntry, PlatformAuditEntry } from './audit.service.js';
 
 export interface RequestMeta {
   ip: string | null;
@@ -21,4 +21,8 @@ export function auditContext(
     deviceId: req.device?.id ?? req.principal?.deviceId ?? null,
     ...requestMeta(req),
   };
+}
+
+export function platformAuditContext(req: RequestWithContext): Pick<PlatformAuditEntry, 'actorId' | 'ip' | 'userAgent' | 'correlationId'> {
+  return { actorId: req.principal?.realm === 'platform' ? req.principal.userId : null, ...requestMeta(req) };
 }
