@@ -1,21 +1,23 @@
 import { Body, Controller, HttpCode, Post, Req, Res } from '@nestjs/common';
-import { LoginSchema, MfaVerifySchema, SetupPasswordSchema } from '@pos/shared';
+import { LoginSchema, MfaVerifySchema, PinLoginSchema, SetupPasswordSchema, StepUpSchema } from '@pos/shared';
 import type { Response } from 'express';
 import type { z } from 'zod';
 import { AppError } from '../../common/errors/app-error.js';
 import type { RequestWithContext } from '../../common/request-context.js';
 import { ZodPipe } from '../../common/zod.pipe.js';
-import { Public } from '../access/decorators.js';
-import { requestMeta } from '../audit/audit-context.js';
+import { Public, RequiresDevice } from '../access/decorators.js';
+import { auditContext, requestMeta } from '../audit/audit-context.js';
 import { AuthService } from './auth.service.js';
 import { clearRefreshCookie, REFRESH_COOKIE, setRefreshCookie, TENANT_COOKIE_PATH } from './cookies.js';
 import { SessionService } from './session.service.js';
+import { StepUpService } from './step-up.service.js';
 
 @Controller('auth')
 export class AuthController {
   constructor(
     private readonly auth: AuthService,
     private readonly sessions: SessionService,
+    private readonly stepUp: StepUpService,
   ) {}
 
   @Public()
@@ -68,5 +70,26 @@ export class AuthController {
   async logout(@Req() req: RequestWithContext, @Res({ passthrough: true }) res: Response) {
     if (req.principal?.sessionId) await this.sessions.revoke(req.tenant!.id, req.principal.sessionId);
     clearRefreshCookie(res, TENANT_COOKIE_PATH);
+  }
+
+  @Public()
+  @RequiresDevice()
+  @Post('pin')
+  @HttpCode(200)
+  async pin(
+    @Req() req: RequestWithContext,
+    @Body(new ZodPipe(PinLoginSchema)) body: z.infer<typeof PinLoginSchema>,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const session = await this.auth.pinLogin(req.tenant!, req.device!, body, requestMeta(req));
+    setRefreshCookie(res, session.refreshToken, TENANT_COOKIE_PATH);
+    return { status: 'ok', accessToken: session.accessToken };
+  }
+
+  @RequiresDevice()
+  @Post('step-up')
+  @HttpCode(200)
+  stepUpApprove(@Req() req: RequestWithContext, @Body(new ZodPipe(StepUpSchema)) body: z.infer<typeof StepUpSchema>) {
+    return this.stepUp.approve(req.tenant!, req.device!, req.principal!.userId, body, auditContext(req));
   }
 }

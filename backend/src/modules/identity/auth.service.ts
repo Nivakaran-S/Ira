@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
-import type { LoginSchema, MfaVerifySchema, SetupPasswordSchema } from '@pos/shared';
+import type { LoginSchema, MfaVerifySchema, PinLoginSchema, SetupPasswordSchema } from '@pos/shared';
 import type { z } from 'zod';
 import { Aead } from '../../common/crypto/aead.js';
 import { base32Encode } from '../../common/crypto/base32.js';
@@ -131,6 +131,35 @@ export class AuthService {
       if (!user) throw AppError.unauthenticated('Invalid or expired setup code');
       await tx.user.update({ where: { id: user.id }, data: { passwordHash, setupTokenHash: null, setupTokenExpiresAt: null } });
       await this.audit.record(tx, tenant.id, { ...meta, action: 'auth.password_set', entityType: 'User', entityId: user.id, actorUserId: user.id });
+    });
+  }
+
+  async pinLogin(
+    tenant: TenantContext,
+    device: { id: string },
+    input: z.infer<typeof PinLoginSchema>,
+    meta: RequestMeta,
+  ): Promise<IssuedSession> {
+    if (!(await this.limiter.consume(`pin-dev:${device.id}`, 30, 900))) throw AppError.rateLimited();
+    const user = await this.tenantDb.run(tenant.id, (tx) => tx.user.findFirst({ where: { id: input.userId, status: 'ACTIVE' } }));
+    if (user) this.lockout.assertNotLocked(user.pinLockedUntil);
+    const ok = await this.passwords.verify(user?.pinHash, input.pin);
+    if (!user || !ok) {
+      if (user) await this.lockout.recordFailure(tenant.id, user.id, 'pin', { ...meta, deviceId: device.id });
+      throw AppError.unauthenticated('Invalid PIN');
+    }
+    return this.tenantDb.run(tenant.id, async (tx) => {
+      await this.lockout.resetInTx(tx, user.id, 'pin');
+      const session = await this.sessions.start(tx, { tenantId: tenant.id, userId: user.id, deviceId: device.id });
+      await this.audit.record(tx, tenant.id, {
+        ...meta,
+        action: 'auth.pin_login',
+        entityType: 'User',
+        entityId: user.id,
+        actorUserId: user.id,
+        deviceId: device.id,
+      });
+      return session;
     });
   }
 }

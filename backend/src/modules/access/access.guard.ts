@@ -6,6 +6,7 @@ import { ModuleCheck } from './checks/module.check.js';
 import { PermissionCheck } from './checks/permission.check.js';
 import { TenantStatusCheck } from './checks/tenant-status.check.js';
 import { DeviceCheck } from './checks/device.check.js';
+import { StepUpCheck } from './checks/step-up.check.js';
 
 export interface AccessCheck {
   check(ctx: ExecutionContext, req: RequestWithContext): Promise<void> | void;
@@ -23,8 +24,9 @@ export class AccessGuard implements CanActivate {
     device: DeviceCheck,
     modules: ModuleCheck,
     permissions: PermissionCheck,
+    stepUp: StepUpCheck,
   ) {
-    this.steps = [realm, tenantStatus, auth, device, modules, permissions];
+    this.steps = [realm, tenantStatus, auth, device, modules, permissions, stepUp];
   }
 
   async canActivate(ctx: ExecutionContext): Promise<boolean> {
