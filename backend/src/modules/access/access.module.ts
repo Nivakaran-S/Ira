@@ -3,6 +3,7 @@ import { APP_GUARD } from '@nestjs/core';
 import { AccessGuard } from './access.guard.js';
 import { CapabilitiesService } from './capabilities.service.js';
 import { AuthCheck } from './checks/auth.check.js';
+import { DeviceCheck } from './checks/device.check.js';
 import { ModuleCheck } from './checks/module.check.js';
 import { PermissionCheck } from './checks/permission.check.js';
 import { RealmCheck } from './checks/realm.check.js';
@@ -19,6 +20,7 @@ import { TenantResolverService } from './tenant-resolver.service.js';
     RealmCheck,
     TenantStatusCheck,
     AuthCheck,
+    DeviceCheck,
     ModuleCheck,
     PermissionCheck,
     { provide: APP_GUARD, useClass: AccessGuard },

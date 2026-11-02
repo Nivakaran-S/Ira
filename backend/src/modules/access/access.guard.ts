@@ -5,6 +5,7 @@ import { RealmCheck } from './checks/realm.check.js';
 import { ModuleCheck } from './checks/module.check.js';
 import { PermissionCheck } from './checks/permission.check.js';
 import { TenantStatusCheck } from './checks/tenant-status.check.js';
+import { DeviceCheck } from './checks/device.check.js';
 
 export interface AccessCheck {
   check(ctx: ExecutionContext, req: RequestWithContext): Promise<void> | void;
@@ -15,8 +16,15 @@ export interface AccessCheck {
 export class AccessGuard implements CanActivate {
   private readonly steps: AccessCheck[];
 
-  constructor(realm: RealmCheck, tenantStatus: TenantStatusCheck, auth: AuthCheck, modules: ModuleCheck, permissions: PermissionCheck) {
-    this.steps = [realm, tenantStatus, auth, modules, permissions];
+  constructor(
+    realm: RealmCheck,
+    tenantStatus: TenantStatusCheck,
+    auth: AuthCheck,
+    device: DeviceCheck,
+    modules: ModuleCheck,
+    permissions: PermissionCheck,
+  ) {
+    this.steps = [realm, tenantStatus, auth, device, modules, permissions];
   }
 
   async canActivate(ctx: ExecutionContext): Promise<boolean> {
