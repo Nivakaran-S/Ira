@@ -3,6 +3,7 @@ import cookieParser from 'cookie-parser';
 import helmet from 'helmet';
 import { correlationMiddleware } from './common/correlation.js';
 import { ENV, type Env } from './config/env.js';
+import { TenantResolverService } from './modules/access/tenant-resolver.service.js';
 
 /** Everything main.ts and the test harness must configure identically. */
 export function configureApp(app: NestExpressApplication) {
@@ -11,6 +12,7 @@ export function configureApp(app: NestExpressApplication) {
   app.disable('x-powered-by');
   app.setGlobalPrefix('api');
   app.use(correlationMiddleware);
+  app.use(app.get(TenantResolverService).middleware);
   app.use(helmet());
   app.use(cookieParser());
   app.enableShutdownHooks();
