@@ -1,5 +1,6 @@
 import { type CanActivate, type ExecutionContext, Injectable } from '@nestjs/common';
 import type { RequestWithContext } from '../../common/request-context.js';
+import { AuthCheck } from './checks/auth.check.js';
 import { RealmCheck } from './checks/realm.check.js';
 
 export interface AccessCheck {
@@ -11,8 +12,8 @@ export interface AccessCheck {
 export class AccessGuard implements CanActivate {
   private readonly steps: AccessCheck[];
 
-  constructor(realm: RealmCheck) {
-    this.steps = [realm];
+  constructor(realm: RealmCheck, auth: AuthCheck) {
+    this.steps = [realm, auth];
   }
 
   async canActivate(ctx: ExecutionContext): Promise<boolean> {
