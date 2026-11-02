@@ -3,11 +3,12 @@ import { APP_FILTER } from '@nestjs/core';
 import { AppErrorFilter } from './common/errors/app-error.filter.js';
 import { ConfigModule } from './config/env.js';
 import { InfraModule } from './infra/infra.module.js';
+import { AuditModule } from './modules/audit/audit.module.js';
 import { SecurityModule } from './security/security.module.js';
 import { HealthController } from './modules/health/health.controller.js';
 
 @Module({
-  imports: [ConfigModule, InfraModule, SecurityModule],
+  imports: [ConfigModule, InfraModule, SecurityModule, AuditModule],
   controllers: [HealthController],
   providers: [{ provide: APP_FILTER, useClass: AppErrorFilter }],
 })
