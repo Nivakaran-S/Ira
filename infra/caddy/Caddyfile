@@ -1,0 +1,23 @@
+# Local development edge. Production config ships with the deploy milestone.
+{
+	on_demand_tls {
+		ask http://host.docker.internal:3000/api/internal/caddy/ask
+	}
+}
+
+https:// {
+	tls internal {
+		on_demand
+	}
+
+	@internal path /api/internal/*
+	respond @internal 404
+
+	handle /api/* {
+		reverse_proxy host.docker.internal:3000
+	}
+
+	handle {
+		respond "POS frontend is not built yet (Plan 1b)." 200
+	}
+}

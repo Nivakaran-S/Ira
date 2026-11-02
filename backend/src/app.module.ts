@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { APP_FILTER } from '@nestjs/core';
+import { ScheduleModule } from '@nestjs/schedule';
 import { AppErrorFilter } from './common/errors/app-error.filter.js';
 import { ConfigModule } from './config/env.js';
 import { InfraModule } from './infra/infra.module.js';
@@ -12,7 +13,7 @@ import { SecurityModule } from './security/security.module.js';
 import { HealthController } from './modules/health/health.controller.js';
 
 @Module({
-  imports: [ConfigModule, InfraModule, SecurityModule, AuditModule, AccessModule, IdentityModule, BackofficeModule, PlatformModule],
+  imports: [ScheduleModule.forRoot(), ConfigModule, InfraModule, SecurityModule, AuditModule, AccessModule, IdentityModule, BackofficeModule, PlatformModule],
   controllers: [HealthController],
   providers: [{ provide: APP_FILTER, useClass: AppErrorFilter }],
 })
