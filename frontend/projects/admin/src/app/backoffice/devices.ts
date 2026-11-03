@@ -1,6 +1,6 @@
 import { DatePipe } from '@angular/common';
-import { ChangeDetectionStrategy, Component, computed, DestroyRef, inject, resource, signal } from '@angular/core';
-import { humanMessage, toApiError, ToastService, UiBadge, UiCopy, UiEmpty, UiField } from 'ui';
+import { ChangeDetectionStrategy, Component, computed, DestroyRef, inject, signal } from '@angular/core';
+import { apiResource, humanMessage, toApiError, ToastService, UiBadge, UiCopy, UiEmpty, UiField } from 'ui';
 import { BackofficeApi, type Device, type Enrollment } from './backoffice-api';
 import { BackofficeSession } from './session';
 
@@ -20,7 +20,7 @@ import { BackofficeSession } from './session';
               <p>On the till, open <span class="mono">{{ host }}/pos/</span> and enter this code for <strong>{{ registerName(e.registerId) }}</strong>. It works once.</p>
               <ui-copy [value]="e.code" [large]="true" data-testid="enrollment-code" />
               <div class="small" [class.error-text]="secondsLeft() === 0">{{ secondsLeft() > 0 ? 'Expires in ' + countdown() : 'Expired — create a new code.' }}</div>
-              <div><button class="btn small" type="button" (click)="enrollment.set(null)">Done</button></div>
+              <div><button class="btn small" type="button" (click)="enrollment.set(null); devices.reload()">Done</button></div>
             </div>
           } @else if (registers.value()?.length === 0) {
             <p class="muted">Add a register first.</p>
@@ -61,7 +61,7 @@ import { BackofficeSession } from './session';
             </tbody>
           </table>
         } @else {
-          <ui-empty [title]="devices.isLoading() ? 'Loading…' : 'No devices enrolled'" />
+          <ui-empty [title]="devices.errorMessage() ?? (devices.isLoading() ? 'Loading…' : 'No devices enrolled')" />
         }
       </section>
     </div>
@@ -72,8 +72,8 @@ export class Devices {
   private readonly toasts = inject(ToastService);
   protected readonly session = inject(BackofficeSession);
   protected readonly host = location.host;
-  protected readonly devices = resource({ loader: () => this.api.devices() });
-  protected readonly registers = resource({ loader: () => this.api.registers() });
+  protected readonly devices = apiResource({ loader: () => this.api.devices() });
+  protected readonly registers = apiResource({ loader: () => this.api.registers() });
   protected readonly registerId = signal('');
   protected readonly enrollment = signal<Enrollment | null>(null);
   private readonly now = signal(Date.now());
@@ -87,8 +87,28 @@ export class Devices {
   });
 
   constructor() {
-    const timer = setInterval(() => this.now.set(Date.now()), 1000);
+    let ticks = 0;
+    // While a code is on screen, watch for the till to appear so the manager sees it land.
+    const timer = setInterval(() => {
+      this.now.set(Date.now());
+      if (this.enrollment() && ++ticks % 3 === 0) void this.checkForNewDevice();
+    }, 1000);
     inject(DestroyRef).onDestroy(() => clearInterval(timer));
+  }
+
+  private knownDeviceIds = new Set<string>();
+
+  private async checkForNewDevice() {
+    const e = this.enrollment();
+    if (!e) return;
+    const list = await this.api.devices().catch(() => null);
+    if (!list) return;
+    const added = list.find((d) => d.registerId === e.registerId && !d.revokedAt && !this.knownDeviceIds.has(d.id));
+    if (added) {
+      this.devices.set(list);
+      this.enrollment.set(null);
+      this.toasts.success(`${added.name} enrolled`);
+    }
   }
 
   protected val(e: Event) {
@@ -101,6 +121,7 @@ export class Devices {
 
   protected async createCode() {
     try {
+      this.knownDeviceIds = new Set((this.devices.value() ?? []).map((d) => d.id));
       this.enrollment.set(await this.api.createEnrollment(this.registerId()));
     } catch (e) {
       this.toasts.error(humanMessage(toApiError(e)));

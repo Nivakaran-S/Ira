@@ -1,7 +1,8 @@
 import { HttpClient } from '@angular/common/http';
-import { ChangeDetectionStrategy, Component, inject, resource } from '@angular/core';
+import { ChangeDetectionStrategy, Component, inject } from '@angular/core';
 import { Router } from '@angular/router';
 import { firstValueFrom } from 'rxjs';
+import { apiResource } from 'ui';
 import { PosSession } from '../device/pos-session';
 
 interface Me {
@@ -41,7 +42,7 @@ export class Till {
   protected readonly session = inject(PosSession);
   private readonly http = inject(HttpClient);
   private readonly router = inject(Router);
-  protected readonly me = resource({ loader: () => firstValueFrom(this.http.get<Me>('/api/me')) });
+  protected readonly me = apiResource({ loader: () => firstValueFrom(this.http.get<Me>('/api/me')) });
 
   protected async lock() {
     await this.session.lock().catch(() => undefined);

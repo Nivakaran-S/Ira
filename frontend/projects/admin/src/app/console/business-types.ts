@@ -1,6 +1,6 @@
-import { ChangeDetectionStrategy, Component, computed, inject, resource, signal } from '@angular/core';
+import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@angular/core';
 import { MODULE_KEYS, MODULES, PERMISSIONS } from '@pos/shared';
-import { fieldErrors, humanMessage, toApiError, ToastService, UiBadge, UiDialog, UiEmpty, UiField } from 'ui';
+import { apiResource, fieldErrors, humanMessage, toApiError, ToastService, UiBadge, UiDialog, UiEmpty, UiField } from 'ui';
 import { type BusinessType, type BusinessTypeInput, ConsoleApi, type RoleTemplate } from './console-api';
 import { dependencyIssues } from './modules-view';
 import { slugify } from './tenant-new';
@@ -53,7 +53,7 @@ const blank = (): Draft => ({
             </tbody>
           </table>
         } @else {
-          <ui-empty [title]="types.isLoading() ? 'Loading…' : 'No business types yet'" />
+          <ui-empty [title]="types.errorMessage() ?? (types.isLoading() ? 'Loading…' : 'No business types yet')" />
         }
       </section>
     </div>
@@ -119,7 +119,7 @@ const blank = (): Draft => ({
 export class BusinessTypes {
   private readonly api = inject(ConsoleApi);
   private readonly toasts = inject(ToastService);
-  protected readonly types = resource({ loader: () => this.api.listBusinessTypes() });
+  protected readonly types = apiResource({ loader: () => this.api.listBusinessTypes() });
   protected readonly moduleKeys = MODULE_KEYS;
   protected readonly permissions = PERMISSIONS;
 

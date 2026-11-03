@@ -1,6 +1,6 @@
-import { ChangeDetectionStrategy, Component, computed, inject, resource, signal } from '@angular/core';
+import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@angular/core';
 import { PERMISSIONS } from '@pos/shared';
-import { fieldErrors, humanMessage, toApiError, ToastService, UiBadge, UiDialog, UiEmpty, UiField } from 'ui';
+import { apiResource, fieldErrors, humanMessage, toApiError, ToastService, UiBadge, UiDialog, UiEmpty, UiField } from 'ui';
 import { BackofficeApi } from './backoffice-api';
 import { BackofficeSession } from './session';
 
@@ -30,7 +30,7 @@ import { BackofficeSession } from './session';
             </tbody>
           </table>
         } @else {
-          <ui-empty [title]="roles.isLoading() ? 'Loading…' : 'No roles'" />
+          <ui-empty [title]="roles.errorMessage() ?? (roles.isLoading() ? 'Loading…' : 'No roles')" />
         }
       </section>
     </div>
@@ -71,7 +71,7 @@ export class Roles {
   private readonly toasts = inject(ToastService);
   protected readonly session = inject(BackofficeSession);
   protected readonly permissions = PERMISSIONS;
-  protected readonly roles = resource({ loader: () => this.api.roles() });
+  protected readonly roles = apiResource({ loader: () => this.api.roles() });
   protected readonly open = signal(false);
   protected readonly name = signal('');
   protected readonly selected = signal<string[]>([]);

@@ -17,7 +17,12 @@ https:// {
 		reverse_proxy host.docker.internal:3000
 	}
 
+	# Dev: the Angular dev servers. Production serves the built bundles.
+	handle /pos/* {
+		reverse_proxy host.docker.internal:4201
+	}
+
 	handle {
-		respond "POS frontend is not built yet (Plan 1b)." 200
+		reverse_proxy host.docker.internal:4200
 	}
 }

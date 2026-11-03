@@ -1,4 +1,5 @@
 export * from './lib/api-error';
+export * from './lib/api-resource';
 export * from './lib/badge';
 export * from './lib/copy';
 export * from './lib/dialog';

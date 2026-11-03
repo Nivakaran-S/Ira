@@ -1,5 +1,5 @@
-import { ChangeDetectionStrategy, Component, computed, inject, resource, signal } from '@angular/core';
-import { fieldErrors, humanMessage, toApiError, ToastService, UiBadge, UiCopy, UiDialog, UiEmpty, UiField } from 'ui';
+import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@angular/core';
+import { apiResource, fieldErrors, humanMessage, toApiError, ToastService, UiBadge, UiCopy, UiDialog, UiEmpty, UiField } from 'ui';
 import { BackofficeApi, type User } from './backoffice-api';
 import { BackofficeSession } from './session';
 
@@ -45,7 +45,7 @@ import { BackofficeSession } from './session';
             </tbody>
           </table>
         } @else {
-          <ui-empty [title]="users.isLoading() ? 'Loading…' : 'No users yet'" />
+          <ui-empty [title]="users.errorMessage() ?? (users.isLoading() ? 'Loading…' : 'No users yet')" />
         }
       </section>
     </div>
@@ -95,8 +95,8 @@ export class Users {
   protected readonly session = inject(BackofficeSession);
   protected readonly host = location.host;
 
-  protected readonly users = resource({ loader: () => this.api.users() });
-  protected readonly roles = resource({ loader: () => this.api.roles() });
+  protected readonly users = apiResource({ loader: () => this.api.users() });
+  protected readonly roles = apiResource({ loader: () => this.api.roles() });
 
   protected readonly open = signal(false);
   protected readonly name = signal('');

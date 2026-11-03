@@ -1,7 +1,7 @@
 import { DatePipe } from '@angular/common';
-import { ChangeDetectionStrategy, Component, inject, resource } from '@angular/core';
+import { ChangeDetectionStrategy, Component, inject } from '@angular/core';
 import { RouterLink } from '@angular/router';
-import { humanMessage, toApiError, UiBadge, UiEmpty } from 'ui';
+import { apiResource, humanMessage, toApiError, UiBadge, UiEmpty } from 'ui';
 import { ConsoleApi } from './console-api';
 
 @Component({
@@ -46,7 +46,7 @@ import { ConsoleApi } from './console-api';
 export class TenantsList {
   private readonly api = inject(ConsoleApi);
   protected readonly platformDomain = location.hostname.replace(/^admin\./, '');
-  protected readonly tenants = resource({ loader: () => this.api.listTenants() });
+  protected readonly tenants = apiResource({ loader: () => this.api.listTenants() });
 
   protected errorText() {
     return humanMessage(toApiError(this.tenants.error()));

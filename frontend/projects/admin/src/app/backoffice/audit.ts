@@ -1,6 +1,6 @@
 import { DatePipe } from '@angular/common';
-import { ChangeDetectionStrategy, Component, inject, resource, signal } from '@angular/core';
-import { humanMessage, toApiError, UiBadge, UiEmpty } from 'ui';
+import { ChangeDetectionStrategy, Component, inject, signal } from '@angular/core';
+import { apiResource, humanMessage, toApiError, UiBadge, UiEmpty } from 'ui';
 import { BackofficeApi, type ChainResult } from './backoffice-api';
 
 @Component({
@@ -46,7 +46,7 @@ import { BackofficeApi, type ChainResult } from './backoffice-api';
             </tbody>
           </table>
         } @else {
-          <ui-empty [title]="events.isLoading() ? 'Loading…' : 'No events'" />
+          <ui-empty [title]="events.errorMessage() ?? (events.isLoading() ? 'Loading…' : 'No events')" />
         }
       </section>
     </div>
@@ -54,7 +54,7 @@ import { BackofficeApi, type ChainResult } from './backoffice-api';
 })
 export class Audit {
   private readonly api = inject(BackofficeApi);
-  protected readonly events = resource({ loader: () => this.api.audit(100) });
+  protected readonly events = apiResource({ loader: () => this.api.audit(100) });
   protected readonly chain = signal<ChainResult | null>(null);
   protected readonly verifyError = signal<string | null>(null);
 

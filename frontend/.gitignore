@@ -42,3 +42,8 @@ __screenshots__/
 # System files
 .DS_Store
 Thumbs.db
+
+# Playwright
+/e2e/.state.json
+/test-results
+/playwright-report

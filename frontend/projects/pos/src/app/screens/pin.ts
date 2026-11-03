@@ -1,6 +1,6 @@
-import { ChangeDetectionStrategy, Component, inject, input, resource, signal, viewChild } from '@angular/core';
+import { ChangeDetectionStrategy, Component, inject, input, signal, viewChild } from '@angular/core';
 import { Router } from '@angular/router';
-import { humanMessage, toApiError } from 'ui';
+import { apiResource, humanMessage, toApiError } from 'ui';
 import { type PinUser, PosSession } from '../device/pos-session';
 import { PinPad } from './pin-pad';
 
@@ -65,7 +65,7 @@ export class Pin {
   private readonly router = inject(Router);
   readonly reason = input<string>();
 
-  protected readonly users = resource({ loader: () => this.session.pinPad() });
+  protected readonly users = apiResource({ loader: () => this.session.pinPad() });
   protected readonly selected = signal<PinUser | null>(null);
   protected readonly busy = signal(false);
   protected readonly error = signal<string | null>(null);

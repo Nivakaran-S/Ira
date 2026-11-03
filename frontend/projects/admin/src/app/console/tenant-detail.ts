@@ -1,7 +1,7 @@
 import { DatePipe } from '@angular/common';
-import { ChangeDetectionStrategy, Component, computed, inject, input, resource, signal } from '@angular/core';
+import { ChangeDetectionStrategy, Component, computed, inject, input, signal } from '@angular/core';
 import { Router, RouterLink } from '@angular/router';
-import { humanMessage, toApiError, ToastService, UiBadge, UiCopy, UiDialog, UiEmpty, UiField } from 'ui';
+import { apiResource, humanMessage, toApiError, ToastService, UiBadge, UiCopy, UiDialog, UiEmpty, UiField } from 'ui';
 import { ConsoleApi, type DomainView, type TenantDetail as Tenant, type TenantModules } from './console-api';
 import { moduleRows } from './modules-view';
 import { tenantUrl } from './tenant-new';
@@ -152,10 +152,10 @@ export class TenantDetail {
   readonly id = input.required<string>();
 
   protected readonly platformDomain = location.hostname.replace(/^admin\./, '');
-  protected readonly tenant = resource({ params: () => this.id(), loader: ({ params }) => this.api.getTenant(params) });
-  protected readonly modules = resource({ params: () => this.id(), loader: ({ params }) => this.api.getModules(params) });
-  protected readonly domains = resource({ params: () => this.id(), loader: ({ params }) => this.api.listDomains(params) });
-  protected readonly businessTypes = resource({ loader: () => this.api.listBusinessTypes() });
+  protected readonly tenant = apiResource({ params: () => this.id(), loader: ({ params }) => this.api.getTenant(params) });
+  protected readonly modules = apiResource({ params: () => this.id(), loader: ({ params }) => this.api.getModules(params) });
+  protected readonly domains = apiResource({ params: () => this.id(), loader: ({ params }) => this.api.listDomains(params) });
+  protected readonly businessTypes = apiResource({ loader: () => this.api.listBusinessTypes() });
 
   protected readonly rows = computed(() => {
     const m = this.modules.value();

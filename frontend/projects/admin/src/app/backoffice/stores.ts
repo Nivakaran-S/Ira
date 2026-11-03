@@ -1,5 +1,5 @@
-import { ChangeDetectionStrategy, Component, computed, inject, resource, signal } from '@angular/core';
-import { fieldErrors, humanMessage, toApiError, ToastService, UiEmpty, UiField } from 'ui';
+import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@angular/core';
+import { apiResource, fieldErrors, humanMessage, toApiError, ToastService, UiEmpty, UiField } from 'ui';
 import { BackofficeApi } from './backoffice-api';
 
 @Component({
@@ -20,7 +20,7 @@ import { BackofficeApi } from './backoffice-api';
             </tbody>
           </table>
         } @else {
-          <ui-empty [title]="stores.isLoading() ? 'Loading…' : 'No stores yet'" />
+          <ui-empty [title]="stores.errorMessage() ?? (stores.isLoading() ? 'Loading…' : 'No stores yet')" />
         }
       </section>
       <section class="card stack">
@@ -39,7 +39,7 @@ import { BackofficeApi } from './backoffice-api';
 export class Stores {
   private readonly api = inject(BackofficeApi);
   private readonly toasts = inject(ToastService);
-  protected readonly stores = resource({ loader: () => this.api.stores() });
+  protected readonly stores = apiResource({ loader: () => this.api.stores() });
   protected readonly name = signal('');
   protected readonly code = signal('');
   protected readonly errors = signal<Record<string, string>>({});

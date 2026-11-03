@@ -19,6 +19,6 @@
     "dev:admin": "npm run build:shared && npm run start -w frontend -- admin",
     "dev:pos": "npm run build:shared && npm run start -w frontend -- pos",
     "test:frontend": "npm run build:shared && npm run test:unit -w frontend",
-    "e2e": "npm run build:shared && npm run e2e -w frontend"
+    "e2e": "npm run build:shared && npm run build -w backend && npm run e2e -w frontend"
   }
 }

@@ -1,6 +1,6 @@
-import { ChangeDetectionStrategy, Component, computed, inject, resource, signal } from '@angular/core';
+import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@angular/core';
 import { RouterLink } from '@angular/router';
-import { fieldErrors, humanMessage, toApiError, UiCopy, UiField } from 'ui';
+import { apiResource, fieldErrors, humanMessage, toApiError, UiCopy, UiField } from 'ui';
 import { ConsoleApi, type CreatedTenant } from './console-api';
 
 export function slugify(name: string): string {
@@ -83,7 +83,7 @@ export class TenantNew {
   private readonly api = inject(ConsoleApi);
   protected readonly platformDomain = location.hostname.replace(/^admin\./, '');
   protected readonly tenantUrl = tenantUrl;
-  protected readonly businessTypes = resource({ loader: () => this.api.listBusinessTypes() });
+  protected readonly businessTypes = apiResource({ loader: () => this.api.listBusinessTypes() });
 
   protected readonly name = signal('');
   protected readonly slug = signal('');
