@@ -1,12 +1,11 @@
-import { Component, signal } from '@angular/core';
+import { ChangeDetectionStrategy, Component } from '@angular/core';
 import { RouterOutlet } from '@angular/router';
+import { UiToastHost } from 'ui';
 
 @Component({
-  imports: [RouterOutlet],
   selector: 'pos-root',
-  styleUrl: './app.css',
-  templateUrl: './app.html',
+  changeDetection: ChangeDetectionStrategy.OnPush,
+  imports: [RouterOutlet, UiToastHost],
+  template: `<router-outlet /><ui-toast-host />`,
 })
-export class App {
-  protected readonly title = signal('pos');
-}
+export class App {}

@@ -1,1 +1,10 @@
-/* You can add global styles to this file, and also import other style files */
+/* Till: larger base size for touch screens. */
+html,
+body {
+  font-size: 16px;
+  user-select: none;
+}
+input,
+textarea {
+  user-select: text;
+}
