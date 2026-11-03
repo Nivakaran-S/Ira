@@ -54,6 +54,9 @@
             "styles": [
               "projects/ui/src/styles/tokens.css",
               "projects/admin/src/styles.css"
+            ],
+            "allowedCommonJsDependencies": [
+              "qrcode"
             ]
           },
           "configurations": {
@@ -127,7 +130,10 @@
               "projects/ui/src/styles/tokens.css",
               "projects/pos/src/styles.css"
             ],
-            "baseHref": "/pos/"
+            "baseHref": "/pos/",
+            "allowedCommonJsDependencies": [
+              "qrcode"
+            ]
           },
           "configurations": {
             "production": {
