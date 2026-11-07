@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 export const STATE_FILE = fileURLToPath(new URL('./.state.json', import.meta.url));
 
 /** One super admin per spec file: each spec signs in once and consumes its own one-time code. */
-export const ADMIN_KEYS = ['m1', 'm2', 'm3', 'm4', 'm5', 'm6', 'm6b', 'm7', 'm7b'] as const;
+export const ADMIN_KEYS = ['m1', 'm2', 'm3', 'm4', 'm5', 'm6', 'm6b', 'm7', 'm7b', 'm8'] as const;
 export type AdminKey = (typeof ADMIN_KEYS)[number];
 
 function createAdmin(key: string) {

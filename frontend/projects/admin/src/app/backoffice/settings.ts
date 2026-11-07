@@ -87,7 +87,11 @@ import { Money } from './money';
             <h2>Offline selling</h2>
             <label class="check"><input type="checkbox" [checked]="v.offline.enabled" (change)="patch({ offline: { ...v.offline, enabled: checked($event) } })" /> Tills keep selling without a connection</label>
             <ui-field label="Longest time offline (hours)" for="s-off-h"><input id="s-off-h" inputmode="numeric" [value]="v.offline.maxHours" (change)="patch({ offline: { ...v.offline, maxHours: +val($event) || 24 } })" style="max-width: 120px" /></ui-field>
-            <label class="check"><input type="checkbox" [checked]="v.offline.allowCard" (change)="patch({ offline: { ...v.offline, allowCard: checked($event) } })" /> Card terminal works offline</label>
+            <ui-field label="Largest refund offline" for="s-off-refund" [hint]="'In ' + money.currency() + '. 0 = refunds need a connection.'">
+              <input id="s-off-refund" inputmode="decimal" [value]="money.fmt(v.offline.maxRefund).replaceAll(',', '')" (change)="setOfflineRefund(val($event))" style="max-width: 200px" />
+            </ui-field>
+            <label class="check"><input type="checkbox" [checked]="v.offline.allowCard" (change)="patch({ offline: { ...v.offline, allowCard: checked($event) } })" /> Accept keyed-in card and other payments offline</label>
+            <p class="small muted">Cards charged on a card terminal connected to the till, cash, points and store credit are always accepted offline.</p>
           </section>
           <div><button class="btn primary" type="submit" [disabled]="busy()">Save settings</button></div>
         </form>
@@ -138,6 +142,10 @@ export class Settings {
   protected setRefund(text: string) {
     const amount = this.money.parse(text);
     if (amount !== null) this.s.update((v) => (v ? { ...v, stepUp: { ...v.stepUp, refundAbove: amount } } : v));
+  }
+  protected setOfflineRefund(text: string) {
+    const amount = this.money.parse(text);
+    if (amount !== null) this.s.update((v) => (v ? { ...v, offline: { ...v.offline, maxRefund: amount } } : v));
   }
   protected setDiscount(text: string) {
     const n = Number(text);

@@ -1,8 +1,8 @@
 import { Injectable } from '@angular/core';
 
 const DB = 'pos-local';
-const VERSION = 1;
-export const STORES = ['kv', 'outbox', 'verifiers'] as const;
+const VERSION = 2;
+export const STORES = ['kv', 'outbox', 'verifiers', 'sales'] as const;
 export type StoreName = (typeof STORES)[number];
 
 interface Sealed {
@@ -45,7 +45,7 @@ export function generateDataKey(): Promise<CryptoKey> {
 }
 
 /**
- * The till's offline data (catalog, staff, outbox, PIN verifiers) in IndexedDB, every value sealed
+ * The till's offline data (catalog, staff, outbox, PIN verifiers, recent sales) in IndexedDB, every value sealed
  * with AES-GCM under the device's data key. This protects data copied off the machine, not against
  * code running in the page. Keys (record ids) are not secret and stay in the clear.
  */

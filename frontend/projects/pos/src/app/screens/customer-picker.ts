@@ -1,9 +1,13 @@
 import { ChangeDetectionStrategy, Component, inject, output, signal } from '@angular/core';
 import { humanMessage, toApiError } from 'ui';
 import { PosApi, type TillCustomer } from '../api/pos-api';
+import { isOfflineError } from '../offline/sync-engine';
 import { TillState } from '../till-state';
 
-/** Find a customer by phone or name, or add one. The till only ever sees name, last four digits and balances. */
+/**
+ * Find a customer by phone or name, or add one. The till only ever sees name, last four digits and
+ * balances. Offline, the search runs over the customers synced to this till (name or last four digits).
+ */
 @Component({
   selector: 'pos-customer-picker',
   changeDetection: ChangeDetectionStrategy.OnPush,
@@ -19,7 +23,9 @@ import { TillState } from '../till-state';
           <span class="small muted">{{ c.points }} pts · credit {{ state.money(c.credit) }}</span>
         </button>
       }
-      @if (searched() && !results().length) {
+      @if (searched() && !results().length && state.offline()) {
+        <p class="muted" data-testid="customer-offline">No match on this till. Offline, search by name or the last four digits; new customers need a connection.</p>
+      } @else if (searched() && !results().length) {
         <p class="muted">No match. Add them:</p>
         <div class="row">
           <input aria-label="New customer name" placeholder="Name" data-testid="new-customer-name" [value]="name()" (input)="name.set(val($event))" style="flex: 1" />
@@ -54,9 +60,18 @@ export class CustomerPicker {
     this.busy.set(true);
     this.error.set(null);
     try {
-      this.results.set(await this.api.customers(this.q().trim()));
-      this.searched.set(true);
       const q = this.q().trim();
+      if (this.state.offline()) this.results.set(this.state.sync.customers(q));
+      else {
+        try {
+          this.results.set(await this.api.customers(q));
+        } catch (e) {
+          if (!isOfflineError(e)) throw e;
+          this.state.sync.online.set(false);
+          this.results.set(this.state.sync.customers(q));
+        }
+      }
+      this.searched.set(true);
       if (/^[+0-9 ()-]{7,}$/.test(q)) this.phone.set(q);
       else this.name.set(q);
     } catch (e) {

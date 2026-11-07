@@ -1,12 +1,18 @@
 import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@angular/core';
-import { type PaymentMethodKey, prorate, uuidv7 } from '@pos/shared';
+import { type CardResult, type PaymentMethodKey, prorate, uuidv7 } from '@pos/shared';
 import { humanMessage, toApiError, ToastService } from 'ui';
 import { ApprovalCancelled, Approvals } from '../api/approvals';
 import { PosApi, type Sale } from '../api/pos-api';
-import { HardwareBridge } from '../hardware/bridge';
+import { cardOf, HardwareBridge, TerminalError } from '../hardware/bridge';
+import { OfflineRefused, OfflineTill } from '../offline/offline-till';
+import { SaleJournal } from '../offline/sale-journal';
+import { isOfflineError } from '../offline/sync-engine';
 import { TillState } from '../till-state';
 
-/** Look up a receipt, pick what comes back, refund it. Amounts mirror the API's proportional split. */
+/**
+ * Look up a receipt, pick what comes back, refund it. Amounts mirror the API's proportional split.
+ * Offline, the sale comes from this till's journal and the refund goes into the outbox.
+ */
 @Component({
   selector: 'pos-refund',
   changeDetection: ChangeDetectionStrategy.OnPush,
@@ -14,7 +20,7 @@ import { TillState } from '../till-state';
     <div class="page stack">
       <h1>Refund</h1>
       @if (state.offline()) {
-        <p class="error-text" data-testid="refund-offline">Refunds need a connection to the server.</p>
+        <p class="small muted" data-testid="refund-offline">Offline: sales made or looked up on this till in the last week can be refunded, up to the business's offline limit.</p>
       }
       @if (!state.shiftOpen()) {
         <p class="muted">Open a shift first: refunds are paid from this till's drawer.</p>
@@ -68,7 +74,9 @@ import { TillState } from '../till-state';
             </div>
             <div class="row-between">
               <strong>Refund {{ state.money(total()) }}</strong>
-              <button type="button" class="btn primary" data-testid="do-refund" [disabled]="!valid() || busy() || !state.shiftOpen() || state.offline()" (click)="submit(s)">Refund</button>
+              <button type="button" class="btn primary" data-testid="do-refund" [disabled]="!valid() || busy() || !state.shiftOpen()" (click)="submit(s)">
+                {{ method() === 'CARD' && bridge.hasTerminal() ? 'Refund to card' : 'Refund' }}
+              </button>
             </div>
           }
         </section>
@@ -85,8 +93,12 @@ export class Refund {
   protected readonly state = inject(TillState);
   private readonly api = inject(PosApi);
   private readonly approvals = inject(Approvals);
-  private readonly bridge = inject(HardwareBridge);
+  protected readonly bridge = inject(HardwareBridge);
   private readonly toasts = inject(ToastService);
+  private readonly offlineTill = inject(OfflineTill);
+  private readonly journal = inject(SaleJournal);
+  /** One id per refund attempt: retries reuse it, so neither the API nor the terminal refunds twice. */
+  private attempt: { id: string; card?: CardResult; online?: string[]; offline?: { action: string; approverId: string }[] } = { id: uuidv7() };
 
   protected readonly receiptNo = signal('');
   protected readonly sale = signal<Sale | null>(null);
@@ -114,13 +126,25 @@ export class Refund {
     this.error.set(null);
     this.sale.set(null);
     this.qty.set({});
+    const no = this.receiptNo().trim().toUpperCase();
+    this.attempt = { id: uuidv7() };
     try {
-      const s = await this.api.lookup(this.receiptNo().trim().toUpperCase());
+      let s = this.state.offline() ? await this.journal.get(no) : null;
+      if (!s) {
+        try {
+          s = await this.api.lookup(no);
+          await this.journal.put(s);
+        } catch (e) {
+          if (!isOfflineError(e)) throw e;
+          s = await this.journal.get(no);
+          if (!s) throw new OfflineRefused('Offline, only sales made or looked up on this till in the last week can be found.');
+        }
+      }
       this.sale.set(s);
       const first = s.payments[0]?.method ?? 'CASH';
       this.method.set(first === 'LOYALTY' ? 'CASH' : first);
     } catch (e) {
-      this.error.set(humanMessage(toApiError(e)));
+      this.error.set(e instanceof OfflineRefused ? e.message : humanMessage(toApiError(e)));
     }
   }
 
@@ -152,29 +176,61 @@ export class Refund {
     return prorate(l.total, l.refundedQtyMilli + q, l.qtyMilli) - prorate(l.total, l.refundedQtyMilli, l.qtyMilli);
   }
 
+  /** Card refunds go back through the terminal first, against the original charge when known. */
+  private async terminalRefund(s: Sale): Promise<CardResult | undefined> {
+    if (this.method() !== 'CARD' || !this.bridge.hasTerminal()) return undefined;
+    if (this.attempt.card) return this.attempt.card;
+    const original = s.payments.find((p) => p.method === 'CARD' && p.card)?.card?.terminalRef;
+    const r = await this.bridge.terminal('refund', this.total(), this.state.currency(), this.attempt.id, original);
+    if (r.status !== 'APPROVED') throw new TerminalError(`The terminal did not refund the card: ${r.message ?? r.status.toLowerCase()}.`);
+    this.attempt = { ...this.attempt, card: cardOf(r) };
+    return this.attempt.card;
+  }
+
   protected async submit(s: Sale) {
     this.busy.set(true);
-    const body = {
-      id: uuidv7(),
-      saleId: s.id,
-      lines: Object.entries(this.qty()).map(([saleLineId, qtyMilli]) => ({ saleLineId, qtyMilli })),
-      method: this.method(),
-      reason: this.reason().trim(),
-      restock: this.restock(),
-    };
+    const lines = Object.entries(this.qty()).map(([saleLineId, qtyMilli]) => ({ saleLineId, qtyMilli }));
+    const method = this.method() as 'CASH' | 'CARD' | 'OTHER' | 'STORE_CREDIT';
     try {
-      const refund = await this.approvals.run((h) => this.api.refund(body, h));
-      this.toasts.success(`Refunded ${this.state.money(refund.total + refund.rounding)} (${refund.receiptNo})`);
-      const receipt = await this.api.refundReceipt(refund.id).catch(() => null);
-      if (receipt) await this.bridge.print(receipt, this.method() === 'CASH');
-      this.sale.set(await this.api.sale(s.id));
+      // The manager approves before the terminal pays anything back.
+      if (method === 'CARD' && this.bridge.hasTerminal() && !this.attempt.card && this.offlineTill.refundNeedsApproval(this.total())) {
+        if (this.state.offline()) this.attempt.offline ??= await this.approvals.collectOffline(['sale.refund']);
+        else this.attempt.online ??= [await this.approvals.ask('sale.refund')];
+      }
+      const card = await this.terminalRefund(s);
+      const body = { id: this.attempt.id, saleId: s.id, lines, method, reason: this.reason().trim(), restock: this.restock(), ...(card ? { card } : {}) };
+      if (this.state.offline()) await this.offline(s, body);
+      else {
+        try {
+          const refund = await this.approvals.run((h) => this.api.refund(body, h), this.attempt.online);
+          this.toasts.success(`Refunded ${this.state.money(refund.total + refund.rounding)} (${refund.receiptNo})`);
+          const receipt = await this.api.refundReceipt(refund.id).catch(() => null);
+          if (receipt) await this.bridge.print(receipt, method === 'CASH');
+          const fresh = await this.api.sale(s.id);
+          await this.journal.put(fresh);
+          this.sale.set(fresh);
+          void this.state.refreshShift();
+        } catch (e) {
+          if (!isOfflineError(e)) throw e;
+          this.state.sync.online.set(false);
+          await this.offline(s, body);
+        }
+      }
+      this.attempt = { id: uuidv7() };
       this.qty.set({});
       this.reason.set('');
-      void this.state.refreshShift();
     } catch (e) {
-      if (!(e instanceof ApprovalCancelled)) this.toasts.error(humanMessage(toApiError(e)));
+      if (e instanceof OfflineRefused || e instanceof TerminalError) this.toasts.error(e.message);
+      else if (!(e instanceof ApprovalCancelled)) this.toasts.error(humanMessage(toApiError(e)));
     } finally {
       this.busy.set(false);
     }
+  }
+
+  private async offline(s: Sale, b: { id: string; lines: { saleLineId: string; qtyMilli: number }[]; method: 'CASH' | 'CARD' | 'OTHER' | 'STORE_CREDIT'; reason: string; restock: boolean; card?: CardResult }) {
+    const r = await this.offlineTill.refund(s, b.lines, b.method, b.reason, b.restock, b.id, b.card, this.attempt.offline);
+    this.toasts.success(`Refunded ${this.state.money(r.paidOut)} (${r.receiptNo}), offline`);
+    await this.bridge.print(r.receipt, b.method === 'CASH');
+    this.sale.set((await this.journal.get(s.receiptNo)) ?? s);
   }
 }

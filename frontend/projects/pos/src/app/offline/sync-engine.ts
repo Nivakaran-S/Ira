@@ -3,7 +3,7 @@ import { computed, inject, Injectable, signal } from '@angular/core';
 import { GENESIS, type ModifierGroupDef, type OfflineOp, type OfflineOpKind, offlineReceiptNo, opHash, type PromotionDef, type SyncResult, type TaxRateDef, type TenantSettings } from '@pos/shared';
 import { firstValueFrom } from 'rxjs';
 import { ApiError, ToastService } from 'ui';
-import type { CatalogCategory, CatalogProduct, PosCatalog, ShiftReport } from '../api/pos-api';
+import type { CatalogCategory, CatalogProduct, PosCatalog, ShiftReport, TillCustomer } from '../api/pos-api';
 import { bytesToBase64Url } from '../device/device-signer';
 import { PosSession } from '../device/pos-session';
 import { LocalDb } from './local-db';
@@ -48,11 +48,15 @@ export interface Snapshot {
   barcodes: Record<string, string>;
   promotions: Record<string, PromotionDef>;
   modifierGroups: Record<string, ModifierGroupDef>;
+  /** Name, last four digits and balances, as of the last sync. */
+  customers?: Record<string, TillCustomer>;
 }
 interface SyncState {
   lastContactAt: number | null;
   block: { start: number; end: number; next: number } | null;
   chain: { seq: number; prevHash: string };
+  /** Points and credit spent in ops still in the outbox, per customer: not yet in the synced balances. */
+  pendingSpend?: Record<string, { points: number; credit: number }>;
 }
 interface DownResponse {
   cursor: string;
@@ -72,6 +76,7 @@ interface DownResponse {
   barcodes: { code: string; productId: string }[];
   promotions: PromotionDef[];
   modifierGroups?: ModifierGroupDef[];
+  customers?: TillCustomer[];
 }
 
 const SYNC_EVERY_MS = 15_000;
@@ -191,7 +196,8 @@ export class SyncEngine {
     this.syncing.set(true);
     try {
       await this.down();
-      await this.up();
+      // What was pushed changes the server's view (shift, balances): fetch it again.
+      if (await this.up()) await this.down();
       this.online.set(true);
     } catch (e) {
       if (isOfflineError(e)) this.online.set(false);
@@ -216,9 +222,11 @@ export class SyncEngine {
     const base: Snapshot = r.full || !s
       ? {
           cursor: '0', currency: r.currency, timezone: r.timezone, tenantName: r.tenantName, settings: r.settings, register: r.register,
-          users: [], categories: {}, products: {}, taxGroups: {}, shift: null, modules: [], barcodes: {}, promotions: {}, modifierGroups: {},
+          users: [], categories: {}, products: {}, taxGroups: {}, shift: null, modules: [], barcodes: {}, promotions: {}, modifierGroups: {}, customers: {},
         }
-      : { ...s, barcodes: s.barcodes ?? {}, promotions: s.promotions ?? {}, modules: s.modules ?? [], modifierGroups: s.modifierGroups ?? {} };
+      : { ...s, barcodes: s.barcodes ?? {}, promotions: s.promotions ?? {}, modules: s.modules ?? [], modifierGroups: s.modifierGroups ?? {}, customers: s.customers ?? {} };
+    // Until the outbox is empty the server has not seen this till's latest shift changes: keep the local view.
+    const pending = (await this.db.count('outbox')) > 0;
     // A product in the delta brings its complete list of codes: drop what it had, then add.
     const touched = new Set(r.products.map((p) => p.id));
     const barcodes = Object.fromEntries(Object.entries(base.barcodes).filter(([, pid]) => !touched.has(pid)));
@@ -232,7 +240,7 @@ export class SyncEngine {
       settings: r.settings,
       register: r.register,
       users: r.users,
-      shift: r.shift,
+      shift: pending && s ? s.shift : r.shift,
       categories: { ...base.categories, ...Object.fromEntries(r.categories.map((c) => [c.id, c])) },
       products: { ...base.products, ...Object.fromEntries(r.products.map((p) => [p.id, p])) },
       taxGroups: { ...base.taxGroups, ...Object.fromEntries(r.taxGroups.map((g) => [g.id, g])) },
@@ -240,6 +248,7 @@ export class SyncEngine {
       barcodes,
       promotions: { ...base.promotions, ...Object.fromEntries((r.promotions ?? []).map((p) => [p.id, p])) },
       modifierGroups: { ...base.modifierGroups, ...Object.fromEntries((r.modifierGroups ?? []).map((g) => [g.id, g])) },
+      customers: { ...base.customers, ...Object.fromEntries((r.customers ?? []).map((c) => [c.id, c])) },
     };
     await this.db.put('kv', 'snapshot', next);
     this.snapshot.set(next);
@@ -253,10 +262,13 @@ export class SyncEngine {
     await this.saveState();
   }
 
-  private async up() {
+  /** Pushes the outbox; true when anything was sent. */
+  private async up(): Promise<boolean> {
+    let sent = false;
     for (;;) {
       const batch = await this.db.all<OfflineOp>('outbox', BATCH);
       if (!batch.length) break;
+      sent = true;
       const res = await firstValueFrom(this.http.post<{ results: SyncResult[] }>('/api/pos/sync/up', { ops: batch.map((b) => b.value) }));
       const quarantined = res.results.filter((r) => r.status === 'quarantined');
       for (const b of batch) await this.db.delete('outbox', b.key);
@@ -264,10 +276,41 @@ export class SyncEngine {
       if (quarantined.length) {
         this.toasts.error(`${quarantined.length} offline ${quarantined.length === 1 ? 'entry was' : 'entries were'} held for a manager to review.`);
       }
-      this.state = { ...this.state, lastContactAt: Date.now() };
+      this.state = { ...this.state, lastContactAt: Date.now(), ...(this.outbox() === 0 ? { pendingSpend: {} } : {}) };
       await this.saveState();
       if (batch.length < BATCH) break;
     }
+    return sent;
+  }
+
+  /** A customer with what this till has spent offline taken off the synced balances. */
+  customer(id: string): TillCustomer | null {
+    const c = this.snapshot()?.customers?.[id];
+    if (!c) return null;
+    const p = this.state.pendingSpend?.[id];
+    return p ? { ...c, points: c.points - p.points, credit: c.credit - p.credit } : c;
+  }
+
+  /** Offline search: by name, or by the last four digits of the phone number. */
+  customers(q: string): TillCustomer[] {
+    const text = q.trim().toLowerCase();
+    const digits = q.replace(/\D/g, '');
+    if (!text) return [];
+    return Object.keys(this.snapshot()?.customers ?? {})
+      .map((id) => this.customer(id)!)
+      .filter((c) => c.name.toLowerCase().includes(text) || (digits.length >= 4 && c.phoneLast4 === digits.slice(-4)))
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .slice(0, 20);
+  }
+
+  /** Records points or credit spent by an offline sale until the server has it. */
+  async spend(customerId: string, points: number, credit: number) {
+    if (!points && !credit) return;
+    const all = { ...(this.state.pendingSpend ?? {}) };
+    const cur = all[customerId] ?? { points: 0, credit: 0 };
+    all[customerId] = { points: cur.points + points, credit: cur.credit + credit };
+    this.state = { ...this.state, pendingSpend: all };
+    await this.saveState();
   }
 
   /** Takes the next offline receipt number from this device's reserved block. */

@@ -6,6 +6,7 @@ import { ApprovalCancelled, Approvals } from '../api/approvals';
 import { PosApi, type ShiftReport } from '../api/pos-api';
 import { HardwareBridge } from '../hardware/bridge';
 import { OfflineRefused, OfflineTill } from '../offline/offline-till';
+import { isOfflineError } from '../offline/sync-engine';
 import { TillState } from '../till-state';
 
 const METHOD: Record<string, string> = { CASH: 'Cash', CARD: 'Card', OTHER: 'Other' };
@@ -70,7 +71,7 @@ export function zReport(r: ShiftReport, currency: string, register: string): Rec
         </div>
         <section class="grid-2">
           <div class="card"><div class="muted small">Sales</div><div class="stat">{{ r.sales.count }} · {{ state.money(r.sales.total + r.sales.rounding) }}</div></div>
-          <div class="card"><div class="muted small">Expected in drawer{{ state.offline() ? ' (at last sync)' : '' }}</div><div class="stat" data-testid="expected-cash">{{ state.money(r.cash.expected) }}</div></div>
+          <div class="card"><div class="muted small">Expected in drawer</div><div class="stat" data-testid="expected-cash">{{ state.money(r.cash.expected) }}</div></div>
           <div class="card"><div class="muted small">Refunds</div><div class="stat">{{ r.refunds.count }} · {{ state.money(r.refunds.total) }}</div></div>
           <div class="card"><div class="muted small">By method</div>
             @for (p of r.payments; track p.method) { <div class="row-between small"><span>{{ method[p.method] }}</span><span>{{ state.money(p.amount) }}</span></div> }
@@ -97,14 +98,14 @@ export function zReport(r: ShiftReport, currency: string, register: string): Rec
           <h2>Close the shift</h2>
           <p class="muted">Count the drawer. The difference from the expected amount is recorded as the variance.</p>
           @if (state.offline()) {
-            <p class="error-text">Closing the shift needs a connection: offline sales must reach the server first.</p>
+            <p class="small muted" data-testid="close-offline">Offline: the shift closes on this till against its own figures. The server checks them when the till reconnects.</p>
           } @else if (state.sync.outbox()) {
             <p class="error-text">{{ state.sync.outbox() }} offline entries are still waiting to sync.</p>
           }
           <div class="row">
             <input inputmode="decimal" placeholder="Counted cash" aria-label="Counted cash" data-testid="counted" [value]="counted()" (input)="counted.set(val($event))" style="max-width: 200px" />
             <input placeholder="Note (optional)" aria-label="Note" [value]="note()" (input)="note.set(val($event))" style="flex: 1" />
-            <button type="button" class="btn primary" data-testid="close-shift" [disabled]="busy() || state.offline() || state.sync.outbox() > 0 || state.parse(counted()) === null" (click)="close()">Close shift</button>
+            <button type="button" class="btn primary" data-testid="close-shift" [disabled]="busy() || (!state.offline() && state.sync.outbox() > 0) || state.parse(counted()) === null" (click)="close()">Close shift</button>
             <button type="button" class="btn" (click)="printZ(r)">Print X report</button>
           </div>
         </section>
@@ -188,7 +189,18 @@ export class Shift {
     return this.guarded(async () => {
       const counted = this.state.parse(this.counted());
       if (counted === null) return;
-      const z = await this.approvals.run((h) => this.api.closeShift(counted, this.note().trim() || undefined, h));
+      const note = this.note().trim() || undefined;
+      let z: ShiftReport;
+      if (this.state.offline()) z = await this.offlineTill.closeShift(counted, note);
+      else {
+        try {
+          z = await this.approvals.run((h) => this.api.closeShift(counted, note, h));
+        } catch (e) {
+          if (!isOfflineError(e)) throw e;
+          this.state.sync.online.set(false);
+          z = await this.offlineTill.closeShift(counted, note);
+        }
+      }
       this.closed.set(z);
       await this.state.setShift(null);
       this.counted.set('');

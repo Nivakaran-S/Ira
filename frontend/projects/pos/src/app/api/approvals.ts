@@ -50,8 +50,9 @@ export class Approvals {
     });
   }
 
-  async run<T>(call: (headers: CallHeaders) => Promise<T>): Promise<T> {
-    const tokens: string[] = [];
+  /** `upfront`: step-up tokens already collected, e.g. before charging a card terminal. */
+  async run<T>(call: (headers: CallHeaders) => Promise<T>, upfront: string[] = []): Promise<T> {
+    const tokens = [...upfront];
     for (let attempt = 0; attempt < 4; attempt++) {
       try {
         return await call(tokens.length ? { 'x-step-up-token': tokens.join(',') } : {});

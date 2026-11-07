@@ -1,6 +1,7 @@
-import { ChangeDetectionStrategy, Component, computed, inject, input, output, signal } from '@angular/core';
-import { cashRound } from '@pos/shared';
-import type { PaymentMethodKey } from '@pos/shared';
+import { ChangeDetectionStrategy, Component, computed, inject, input, type OnDestroy, output, signal } from '@angular/core';
+import { cashRound, uuidv7 } from '@pos/shared';
+import type { CardResult, PaymentMethodKey } from '@pos/shared';
+import { cardOf, HardwareBridge } from '../hardware/bridge';
 import { Cart } from '../sell/cart';
 import { TillState } from '../till-state';
 
@@ -9,6 +10,15 @@ export interface PaymentDraft {
   amount: number;
   tendered?: number;
   reference?: string;
+  /** Charged on the integrated terminal. */
+  card?: CardResult;
+}
+
+/** What the panel hands over; the parent says whether the sale was recorded, so terminal charges can be undone if not. */
+export interface PaymentCompletion {
+  payments: PaymentDraft[];
+  tip: number;
+  settle(recorded: boolean): void;
 }
 
 const LABEL: Record<PaymentMethodKey, string> = { CASH: 'Cash', CARD: 'Card', OTHER: 'Other', LOYALTY: 'Points', STORE_CREDIT: 'Store credit' };
@@ -37,7 +47,7 @@ const LABEL: Record<PaymentMethodKey, string> = { CASH: 'Cash', CARD: 'Card', OT
       }
 
       @for (p of paid(); track $index) {
-        <div class="row-between small"><span>{{ label[p.method] }} {{ p.reference ? '· ' + p.reference : '' }}</span><span>{{ state.money(p.amount) }}</span></div>
+        <div class="row-between small"><span>{{ label[p.method] }}{{ p.card ? ' ' + p.card.scheme + ' ****' + p.card.last4 : '' }} {{ p.reference ? '· ' + p.reference : '' }}</span><span>{{ state.money(p.amount) }}</span></div>
       }
 
       <div class="methods">
@@ -66,6 +76,8 @@ const LABEL: Record<PaymentMethodKey, string> = { CASH: 'Cash', CARD: 'Card', OT
           <p class="small muted" data-testid="points-note">{{ cart.customer()?.points }} points available, each worth {{ state.money(pointValue()) }}. Pay in whole points.</p>
         } @else if (method() === 'STORE_CREDIT') {
           <p class="small muted">{{ state.money(cart.customer()?.credit ?? 0) }} store credit available.</p>
+        } @else if (method() === 'CARD' && terminalOn()) {
+          <p class="small muted" data-testid="terminal-note">{{ charging() ? 'Waiting for the card on the terminal…' : 'The card terminal will ask for the card.' }}</p>
         } @else {
           <label>{{ method() === 'CARD' ? 'Terminal approval code' : 'Reference' }} (optional)
             <input data-testid="reference" [value]="reference()" (input)="reference.set(val($event))" />
@@ -78,11 +90,13 @@ const LABEL: Record<PaymentMethodKey, string> = { CASH: 'Cash', CARD: 'Card', OT
       }
       <div class="row-between">
         @if (canSplit()) {
-          <button type="button" class="btn" (click)="addPart()">Add as part payment</button>
+          <button type="button" class="btn" [disabled]="charging()" (click)="addPart()">Add as part payment</button>
         } @else {
           <span></span>
         }
-        <button type="button" class="btn primary go" data-testid="complete" [disabled]="busy()" (click)="finish()">Complete sale</button>
+        <button type="button" class="btn primary go" data-testid="complete" [disabled]="busy() || charging()" (click)="finish()">
+          {{ method() === 'CARD' && terminalOn() && remaining() > 0 ? 'Charge card' : 'Complete sale' }}
+        </button>
       </div>
     </div>
   `,
@@ -97,26 +111,35 @@ const LABEL: Record<PaymentMethodKey, string> = { CASH: 'Cash', CARD: 'Card', OT
     .go { min-height: 52px; min-width: 180px; font-size: 17px; }
   `,
 })
-export class PaymentPanel {
+export class PaymentPanel implements OnDestroy {
   protected readonly state = inject(TillState);
   protected readonly cart = inject(Cart);
+  private readonly bridge = inject(HardwareBridge);
+  protected readonly terminalOn = computed(() => this.bridge.hasTerminal());
+  protected readonly charging = signal(false);
+  /** The sale these payments belong to was recorded: terminal charges stand. */
+  private settled = false;
+
+  constructor() {
+    if (!this.bridge.health()) void this.bridge.check();
+  }
   readonly busy = input(false);
   /** Offer a tip field (restaurants). */
   readonly tips = input(false);
   /** Totals for something other than the cart (an order being paid); defaults to the cart. */
   readonly total = input<number | null>(null);
-  readonly complete = output<{ payments: PaymentDraft[]; tip: number }>();
+  readonly complete = output<PaymentCompletion>();
   protected readonly tipText = signal('');
   protected readonly tip = computed(() => (this.tips() ? (this.state.parse(this.tipText()) ?? 0) : 0));
   private readonly baseTotal = computed(() => this.total() ?? this.cart.total());
   private readonly baseCashTotal = computed(() => (this.total() === null ? this.cart.cashDue() : cashRound(this.total()!, this.cart.settings()?.cashRoundingUnit ?? 1)));
 
-  /** Points and store credit appear when a customer with a balance is on the sale and the till is online. */
+  /** Points and store credit appear when a customer with a balance is on the sale. */
   protected readonly methods = computed<PaymentMethodKey[]>(() => {
     const out: PaymentMethodKey[] = ['CASH', 'CARD', 'OTHER'];
     const c = this.cart.customer();
     const cat = this.state.catalog();
-    if (c && !this.state.offline()) {
+    if (c) {
       const loyalty = this.cart.settings()?.loyalty;
       if ((cat?.modules ?? []).includes('loyalty') && loyalty && c.points >= loyalty.minRedeemPoints) out.push('LOYALTY');
       if (c.credit > 0) out.push('STORE_CREDIT');
@@ -185,18 +208,60 @@ export class PaymentPanel {
     this.tipText.set(this.state.money(Math.round((this.baseTotal() * p) / 100)));
   }
 
-  protected addPart() {
+  /** Charges the card on the terminal; null (with the reason shown) when it was not approved. */
+  private async charge(amount: number): Promise<PaymentDraft | null> {
+    this.charging.set(true);
+    try {
+      const r = await this.bridge.terminal('sale', amount, this.state.currency(), uuidv7());
+      if (r.status !== 'APPROVED') {
+        this.error.set(`Card ${r.status === 'DECLINED' ? 'declined' : 'cancelled'}${r.message ? `: ${r.message}` : ''}.`);
+        return null;
+      }
+      return { method: 'CARD', amount, reference: r.authCode, card: cardOf(r) };
+    } catch (e) {
+      this.error.set((e as Error).message);
+      return null;
+    } finally {
+      this.charging.set(false);
+    }
+  }
+
+  /** Gives terminal charges back, e.g. when the sale could not be recorded. */
+  private async reverse(parts: PaymentDraft[]) {
+    const charged = parts.filter((p) => p.card);
+    if (!charged.length) return;
+    const failed: PaymentDraft[] = [];
+    for (const p of charged) {
+      try {
+        const r = await this.bridge.terminal('refund', p.amount, this.state.currency(), `rev-${p.card!.terminalRef}`.slice(0, 64), p.card!.terminalRef);
+        if (r.status !== 'APPROVED') failed.push(p);
+      } catch {
+        failed.push(p);
+      }
+    }
+    this.paid.update((list) => list.filter((p) => !p.card));
+    this.error.set(failed.length ? 'A card payment could not be reversed on the terminal. Refund it there by hand.' : 'The card payments were reversed on the terminal.');
+  }
+
+  ngOnDestroy() {
+    if (!this.settled) void this.reverse(this.paid());
+  }
+
+  protected async addPart() {
     const amount = this.state.parse(this.amountText());
     if (!amount || amount <= 0 || amount > this.nonCashRemaining()) return this.error.set('Enter an amount up to what is left to pay.');
     const balanceError = this.checkBalance(this.method(), amount);
     if (balanceError) return this.error.set(balanceError);
-    this.paid.update((p) => [...p, { method: this.method(), amount, ...(this.reference().trim() ? { reference: this.reference().trim() } : {}) }]);
+    let part: PaymentDraft | null = { method: this.method(), amount, ...(this.reference().trim() ? { reference: this.reference().trim() } : {}) };
+    if (this.method() === 'CARD' && this.terminalOn()) part = await this.charge(amount);
+    if (!part) return;
+    this.paid.update((p) => [...p, part]);
     this.reference.set('');
     this.error.set(null);
     this.method.set('CASH');
   }
 
-  protected finish() {
+  protected async finish() {
     this.error.set(null);
     const rest = this.remaining();
     let parts = this.paid();
@@ -210,10 +275,27 @@ export class PaymentPanel {
         if (amount !== rest) return this.error.set('This amount must cover what is left; use part payments to split.');
         const balanceError = this.checkBalance(this.method(), amount);
         if (balanceError) return this.error.set(balanceError);
-        parts = [...parts, { method: this.method(), amount, ...(this.reference().trim() ? { reference: this.reference().trim() } : {}) }];
+        let part: PaymentDraft | null = { method: this.method(), amount, ...(this.reference().trim() ? { reference: this.reference().trim() } : {}) };
+        if (this.method() === 'CARD' && this.terminalOn()) {
+          part = await this.charge(amount);
+          if (!part) return;
+          // Charged: keep it with the other parts, so it is reversed if the sale is not recorded.
+          this.paid.update((p) => [...p, part!]);
+          parts = this.paid();
+        } else parts = [...parts, part];
       }
     }
     if (!parts.length) return this.error.set('Nothing to pay.');
-    this.complete.emit({ payments: parts, tip: this.tip() });
+    const attempt = parts;
+    this.complete.emit({
+      payments: attempt,
+      tip: this.tip(),
+      settle: (recorded) => {
+        // The first answer counts: once recorded, a later failure (printing, say) must not undo the charge.
+        if (this.settled) return;
+        if (recorded) this.settled = true;
+        else void this.reverse(attempt);
+      },
+    });
   }
 }

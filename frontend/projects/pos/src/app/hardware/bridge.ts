@@ -1,5 +1,5 @@
 import { inject, Injectable, signal } from '@angular/core';
-import type { ReceiptDoc } from '@pos/shared';
+import type { CardResult, ReceiptDoc } from '@pos/shared';
 import { signRequest } from '../device/device-signer';
 import { PosSession } from '../device/pos-session';
 
@@ -10,6 +10,25 @@ export interface BridgeHealth {
   paired: string | null;
   printer: string | null;
   scale: string | null;
+  terminal?: string | null;
+}
+
+export interface TerminalResult {
+  status: 'APPROVED' | 'DECLINED' | 'CANCELLED';
+  reference: string;
+  amount: number;
+  authCode?: string;
+  scheme?: string;
+  last4?: string;
+  terminalRef?: string;
+  message?: string;
+}
+
+export class TerminalError extends Error {}
+
+/** What the API keeps of an approved terminal result. */
+export function cardOf(r: TerminalResult): CardResult {
+  return { scheme: r.scheme ?? 'CARD', last4: r.last4 ?? '0000', authCode: r.authCode ?? '', terminalRef: r.terminalRef ?? r.reference };
 }
 
 export type PrintResult = 'bridge' | 'browser';
@@ -42,7 +61,12 @@ export class HardwareBridge {
     return !!h && h.paired === this.session.device()?.deviceId;
   }
 
-  private async call(method: 'GET' | 'POST', path: string, body?: unknown): Promise<Response> {
+  /** A card terminal is attached to the paired bridge. */
+  hasTerminal(): boolean {
+    return this.ready() && !!this.health()?.terminal;
+  }
+
+  private async call(method: 'GET' | 'POST', path: string, body?: unknown, timeoutMs = 10_000): Promise<Response> {
     const device = this.session.device();
     if (!device) throw new Error('Till not enrolled');
     const text = body === undefined ? '' : JSON.stringify(body);
@@ -51,8 +75,30 @@ export class HardwareBridge {
       method,
       headers: { ...headers, ...(body === undefined ? {} : { 'content-type': 'application/json' }) },
       body: body === undefined ? undefined : text,
-      signal: AbortSignal.timeout(10_000),
+      signal: AbortSignal.timeout(timeoutMs),
     });
+  }
+
+  /**
+   * Charges or refunds on the terminal. The customer may take a while at the terminal, so this waits
+   * up to two minutes. A lost answer is asked for again with the same reference, which the terminal
+   * answers with its first result instead of charging twice.
+   */
+  async terminal(kind: 'sale' | 'refund', amount: number, currency: string, reference: string, originalRef?: string): Promise<TerminalResult> {
+    if (!this.hasTerminal() && !(await this.check(), this.hasTerminal())) throw new TerminalError('No card terminal is connected to this till.');
+    const body = { amount, currency, reference, ...(originalRef ? { originalRef } : {}) };
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const res = await this.call('POST', `/terminal/${kind}`, body, 120_000);
+        if (!res.ok) throw new TerminalError(`The card terminal reported an error (${res.status}).`);
+        return (await res.json()) as TerminalResult;
+      } catch (e) {
+        if (e instanceof TerminalError) throw e;
+        lastError = e;
+      }
+    }
+    throw new TerminalError(`The card terminal did not answer: ${(lastError as Error)?.message ?? 'no response'}. Check the terminal before trying again.`);
   }
 
   async pair(code: string): Promise<void> {

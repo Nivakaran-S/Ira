@@ -1,4 +1,4 @@
-import { computed, effect, inject, Injectable, signal } from '@angular/core';
+import { computed, effect, inject, Injectable, signal, untracked } from '@angular/core';
 import { formatMinor, formatQty, parseMinor } from '@pos/shared';
 import { PosApi, type ShiftReport } from './api/pos-api';
 import { PosSession } from './device/pos-session';
@@ -33,6 +33,10 @@ export class TillState {
       this.cart.settings.set(this.catalog()?.settings ?? null);
       this.cart.promotions.set(this.catalog()?.promotions ?? []);
     });
+    // Once what was done offline has reached the server, take the server's figures for the shift.
+    effect(() => {
+      if (this.sync.outbox() === 0 && this.sync.online() && this.loaded()) untracked(() => void this.refreshShift().catch(() => undefined));
+    });
   }
 
   async load() {
@@ -54,7 +58,8 @@ export class TillState {
         return;
       }
       this.shift.set(snap?.shift ?? null);
-      this.cashier.set(offlineUser);
+      // Signed in online but the API dropped while loading: still the same person at the till.
+      this.cashier.set(offlineUser ?? this.session.person());
       this.tenantName.set(snap?.tenantName ?? '');
     }
     if (!this.catalog()) {

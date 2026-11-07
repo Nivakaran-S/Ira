@@ -1,6 +1,6 @@
 import { HttpClient, HttpHeaders } from '@angular/common/http';
 import { inject, Injectable } from '@angular/core';
-import type { Discount, ModifierGroupDef, PaymentMethodKey, PromotionDef, ReceiptDoc, TaxRateDef, TenantSettings } from '@pos/shared';
+import type { CardResult, Discount, ModifierGroupDef, PaymentMethodKey, PromotionDef, ReceiptDoc, TaxRateDef, TenantSettings } from '@pos/shared';
 import { firstValueFrom } from 'rxjs';
 
 export interface CatalogProduct {
@@ -138,8 +138,10 @@ export interface Sale {
   loyaltyEarned: number;
   tip: number;
   lines: SaleLine[];
-  payments: { id: string; method: PaymentMethodKey; amount: number; tendered: number | null; change: number; reference: string | null }[];
+  payments: { id: string; method: PaymentMethodKey; amount: number; tendered: number | null; change: number; reference: string | null; card?: CardResult | null }[];
   refunds: { id: string; receiptNo: string; total: number; rounding: number; method: string; createdAt: string }[];
+  /** Made offline and not yet confirmed by the server (journal copies only). */
+  offline?: boolean;
 }
 export interface SaleSummary {
   id: string;
@@ -162,7 +164,7 @@ export interface SaleRequest {
   tip?: number;
   lines: { productId: string; qtyMilli: number; unitPrice?: number; discount?: Discount; note?: string; modifierIds?: string[]; prescriptionItemId?: string }[];
   cartDiscount?: Discount;
-  payments: { method: PaymentMethodKey; amount: number; tendered?: number; reference?: string }[];
+  payments: { method: PaymentMethodKey; amount: number; tendered?: number; reference?: string; card?: CardResult }[];
   expectedTotal: number;
 }
 
@@ -261,7 +263,7 @@ export class PosApi {
   createCustomer(input: { name: string; phone?: string }) {
     return firstValueFrom(this.http.post<TillCustomer>('/api/pos/customers', input));
   }
-  refund(body: { id: string; saleId: string; lines: { saleLineId: string; qtyMilli: number }[]; method: PaymentMethodKey; reason: string; restock: boolean }, h?: CallHeaders) {
+  refund(body: { id: string; saleId: string; lines: { saleLineId: string; qtyMilli: number }[]; method: PaymentMethodKey; reason: string; restock: boolean; card?: CardResult }, h?: CallHeaders) {
     return firstValueFrom(this.http.post<Refund>('/api/pos/refunds', body, opts(h)));
   }
   refundReceipt(id: string) {

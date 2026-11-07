@@ -5,9 +5,10 @@ import { apiResource, humanMessage, toApiError, ToastService, UiDialog } from 'u
 import { ApprovalCancelled, Approvals } from '../api/approvals';
 import { type CatalogProduct, type ChosenModifier, type Order, type OrderLine, PosApi } from '../api/pos-api';
 import { HardwareBridge } from '../hardware/bridge';
+import { SaleJournal } from '../offline/sale-journal';
 import { TillState } from '../till-state';
 import { ModifierPicker } from './modifier-picker';
-import { type PaymentDraft, PaymentPanel } from './payment-panel';
+import { type PaymentCompletion, PaymentPanel } from './payment-panel';
 
 const STATUS: Record<OrderLine['status'], string> = { NEW: 'Not sent', SENT: 'Sent', PREPARING: 'Preparing', READY: 'Ready', SERVED: 'Served', VOID: 'Void' };
 
@@ -84,7 +85,7 @@ const STATUS: Record<OrderLine['status'], string> = { NEW: 'Not sent', SENT: 'Se
 
     <ui-dialog title="Payment" [open]="paying()" (closed)="paying.set(false)">
       @if (paying()) {
-        <pos-payment-panel [busy]="busy()" [tips]="true" [total]="payTotal()" (complete)="pay($event.payments, $event.tip)" />
+        <pos-payment-panel [busy]="busy()" [tips]="true" [total]="payTotal()" (complete)="pay($event)" />
       }
     </ui-dialog>
   `,
@@ -113,6 +114,7 @@ export class OrderScreen {
   private readonly bridge = inject(HardwareBridge);
   private readonly router = inject(Router);
   private readonly toasts = inject(ToastService);
+  private readonly journal = inject(SaleJournal);
   readonly id = input.required<string>();
   protected readonly statusText = STATUS;
 
@@ -186,14 +188,16 @@ export class OrderScreen {
     });
   }
 
-  private async attempt(fn: () => Promise<Order | unknown>) {
+  private async attempt(fn: () => Promise<Order | unknown>): Promise<boolean> {
     this.busy.set(true);
     try {
       const r = await fn();
       if (r && typeof r === 'object' && 'lines' in r) this.order.set(r as Order);
       else this.order.reload();
+      return true;
     } catch (e) {
       if (!(e instanceof ApprovalCancelled)) this.toasts.error(humanMessage(toApiError(e)));
+      return false;
     } finally {
       this.busy.set(false);
     }
@@ -213,19 +217,21 @@ export class OrderScreen {
     return this.attempt(() => this.api.sendOrder(this.id()));
   }
 
-  protected async pay(payments: PaymentDraft[], tip: number) {
+  protected async pay({ payments, tip, settle }: PaymentCompletion) {
     const allCash = payments.every((p) => p.method === 'CASH');
     const total = this.payTotal();
     const cashUnit = this.state.catalog()?.settings.cashRoundingUnit ?? 1;
     const expected = allCash ? Math.round(total / cashUnit) * cashUnit : total;
     const lines = this.selection();
-    await this.attempt(async () => {
+    const ok = await this.attempt(async () => {
       const sale = await this.approvals.run((h) =>
         this.api.payOrder(this.id(), {
           saleId: uuidv7(), lines, tip, expectedTotal: expected,
-          payments: payments.map((p) => ({ method: p.method, amount: p.amount, ...(p.tendered ? { tendered: p.tendered } : {}), ...(p.reference ? { reference: p.reference } : {}) })),
+          payments: payments.map((p) => ({ method: p.method, amount: p.amount, ...(p.tendered ? { tendered: p.tendered } : {}), ...(p.reference ? { reference: p.reference } : {}), ...(p.card ? { card: p.card } : {}) })),
         }),
       );
+      settle(true);
+      await this.journal.put(sale);
       this.paying.set(false);
       this.splitting.set(false);
       this.selected.set({});
@@ -235,5 +241,6 @@ export class OrderScreen {
       void this.state.refreshShift();
       return this.api.order(this.id());
     });
+    if (!ok) settle(false);
   }
 }

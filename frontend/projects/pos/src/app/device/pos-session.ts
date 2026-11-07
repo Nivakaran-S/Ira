@@ -44,6 +44,8 @@ export class PosSession {
   private inflight: Promise<boolean> | null = null;
 
   readonly offlineUser = signal<OfflineUser | null>(null);
+  /** Whoever signed in with their PIN, online or offline: the till's fallback when the API drops mid-session. */
+  readonly person = signal<OfflineUser | null>(null);
 
   readonly accessToken = this.token.asReadonly();
   readonly enrolled = computed(() => this.device() !== null);
@@ -82,6 +84,7 @@ export class PosSession {
   async forgetDevice() {
     this.token.set(null);
     this.offlineUser.set(null);
+    this.person.set(null);
     this.device.set(null);
     await this.localDb.clear().catch(() => undefined);
     this.localDb.useKey(null);
@@ -105,6 +108,7 @@ export class PosSession {
       const r = await firstValueFrom(this.http.post<{ accessToken: string }>('/api/auth/pin', { userId: user.id, pin }, { withCredentials: true }));
       this.offlineUser.set(null);
       this.token.set(r.accessToken);
+      this.person.set({ id: user.id, name: user.name });
       await this.verifiers.remember(user.id, pin).catch(() => undefined);
       return 'online';
     } catch (e) {
@@ -119,6 +123,7 @@ export class PosSession {
     if (result !== 'ok') throw new OfflinePinError(result);
     this.token.set(null);
     this.offlineUser.set({ id: user.id, name: user.name });
+    this.person.set({ id: user.id, name: user.name });
     return 'offline';
   }
 
@@ -142,6 +147,7 @@ export class PosSession {
 
   async lock() {
     this.offlineUser.set(null);
+    this.person.set(null);
     try {
       if (this.token()) await firstValueFrom(this.http.post<void>('/api/auth/logout', null, { withCredentials: true }));
     } finally {

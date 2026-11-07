@@ -36,7 +36,7 @@ const MESSAGES: Partial<Record<ClientErrorCode, string>> = {
   NETWORK: 'Cannot reach the server. Check the connection and try again.',
   RATE_LIMITED: 'Too many attempts. Wait a few minutes and try again.',
   ACCOUNT_LOCKED: 'This account is locked after too many failed attempts. Try again in 15 minutes.',
-  TENANT_SUSPENDED: 'This business is suspended. Contact the platform administrator.',
+  TENANT_SUSPENDED: 'This business is suspended. If an invoice is unpaid, the owner can pay it under Plan and billing; otherwise contact the platform administrator.',
   PLAN_LIMIT_REACHED: 'The plan limit for this item has been reached. Upgrade the plan or remove an existing one.',
   MODULE_DISABLED: 'This feature is not enabled for this business.',
   DEVICE_REVOKED: 'This device has been revoked.',

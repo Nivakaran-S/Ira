@@ -1,6 +1,8 @@
 import { ChangeDetectionStrategy, Component, inject, signal } from '@angular/core';
 import { humanMessage, toApiError } from 'ui';
 import { PosApi } from '../api/pos-api';
+import { OfflineRefused, OfflineTill } from '../offline/offline-till';
+import { isOfflineError } from '../offline/sync-engine';
 import { TillState } from '../till-state';
 
 @Component({
@@ -11,7 +13,7 @@ import { TillState } from '../till-state';
       <h1>Open a shift</h1>
       <p class="muted">Count the cash in the drawer before the first sale.</p>
       @if (state.offline()) {
-        <p class="error-text">Opening a shift needs a connection to the server.</p>
+        <p class="small offline-note" data-testid="open-offline">Offline: the shift opens on this till and reaches the server when it reconnects.</p>
       }
       <label>Opening float
         <input inputmode="decimal" data-testid="float" [value]="float()" (input)="float.set(val($event))" (keydown.enter)="open()" />
@@ -26,10 +28,12 @@ import { TillState } from '../till-state';
     .open { max-width: 420px; margin: var(--s7) auto; }
     label { display: flex; flex-direction: column; gap: 4px; font-weight: 550; }
     input { font-size: 22px; }
+    .offline-note { background: var(--warn-soft); color: var(--warn); padding: var(--s2) var(--s3); border-radius: var(--radius); }
   `,
 })
 export class OpenShift {
   private readonly api = inject(PosApi);
+  private readonly offlineTill = inject(OfflineTill);
   protected readonly state = inject(TillState);
   protected readonly float = signal('0');
   protected readonly busy = signal(false);
@@ -45,8 +49,18 @@ export class OpenShift {
     this.busy.set(true);
     this.error.set(null);
     try {
-      await this.state.setShift(await this.api.openShift(amount));
+      if (this.state.offline()) await this.offlineTill.openShift(amount);
+      else {
+        try {
+          await this.state.setShift(await this.api.openShift(amount));
+        } catch (e) {
+          if (!isOfflineError(e)) throw e;
+          this.state.sync.online.set(false);
+          await this.offlineTill.openShift(amount);
+        }
+      }
     } catch (e) {
+      if (e instanceof OfflineRefused) return this.error.set(e.message);
       const err = toApiError(e);
       if (err.code === 'CONFLICT') await this.state.refreshShift();
       else this.error.set(humanMessage(err));

@@ -13,8 +13,9 @@ import { HardwareBridge } from '../hardware/bridge';
 import { Cart, type CartLine, listPriceOf } from '../sell/cart';
 import { TillState } from '../till-state';
 import { OpenShift } from './open-shift';
-import { PaymentPanel, type PaymentDraft } from './payment-panel';
+import { type PaymentCompletion, PaymentPanel, type PaymentDraft } from './payment-panel';
 import { ReceiptView } from './receipt-view';
+import { SaleJournal } from '../offline/sale-journal';
 
 @Component({
   selector: 'pos-sell',
@@ -58,7 +59,7 @@ import { ReceiptView } from './receipt-view';
                 <span data-testid="cart-customer"><strong>{{ c.name }}</strong> <span class="small muted">{{ c.points }} pts · credit {{ state.money(c.credit) }}</span></span>
                 <button type="button" class="btn small ghost" (click)="cart.customer.set(null)">Remove</button>
               } @else {
-                <button type="button" class="btn small" data-testid="add-customer-btn" [disabled]="state.offline()" (click)="customerOpen.set(true)">+ Customer</button>
+                <button type="button" class="btn small" data-testid="add-customer-btn" (click)="customerOpen.set(true)">+ Customer</button>
               }
             </div>
           }
@@ -175,7 +176,7 @@ import { ReceiptView } from './receipt-view';
 
     <ui-dialog title="Payment" [open]="paying()" (closed)="paying.set(false)">
       @if (paying()) {
-        <pos-payment-panel [busy]="busy()" [tips]="tipsOn()" (complete)="complete($event.payments, $event.tip)" />
+        <pos-payment-panel [busy]="busy()" [tips]="tipsOn()" (complete)="complete($event)" />
       }
     </ui-dialog>
 
@@ -248,6 +249,7 @@ export class Sell {
   private readonly bridge = inject(HardwareBridge);
   private readonly toasts = inject(ToastService);
   private readonly offlineTill = inject(OfflineTill);
+  private readonly journal = inject(SaleJournal);
 
   protected readonly query = signal('');
   protected readonly category = signal<string | null>(null);
@@ -423,12 +425,13 @@ export class Sell {
     if (v && v > 0) this.setCartDiscount({ kind: 'amount', amount: v });
   }
 
-  protected async complete(payments: PaymentDraft[], tip = 0) {
-    if (this.busy()) return;
+  protected async complete({ payments, tip, settle }: PaymentCompletion) {
+    if (this.busy()) return settle(false);
     this.busy.set(true);
     // One id for this sale whichever way it goes: if an online attempt did reach the server, the
     // offline copy syncs as a duplicate instead of a second sale.
     const id = uuidv7();
+    let recorded = false;
     try {
       if (this.state.offline()) await this.completeOffline(payments, id, tip);
       else {
@@ -440,10 +443,12 @@ export class Sell {
           await this.completeOffline(payments, id, tip);
         }
       }
+      recorded = true;
     } catch (e) {
       if (e instanceof OfflineRefused) this.toasts.error(e.message);
       else if (!(e instanceof ApprovalCancelled)) this.toasts.error(humanMessage(toApiError(e)));
     } finally {
+      settle(recorded);
       this.busy.set(false);
     }
   }
@@ -464,11 +469,12 @@ export class Sell {
         ...(l.prescriptionItemId ? { prescriptionItemId: l.prescriptionItemId } : {}),
       })),
       ...(this.cart.cartDiscount() ? { cartDiscount: this.cart.cartDiscount()! } : {}),
-      payments: payments.map((p) => ({ method: p.method, amount: p.amount, ...(p.tendered ? { tendered: p.tendered } : {}), ...(p.reference ? { reference: p.reference } : {}) })),
+      payments: payments.map((p) => ({ method: p.method, amount: p.amount, ...(p.tendered ? { tendered: p.tendered } : {}), ...(p.reference ? { reference: p.reference } : {}), ...(p.card ? { card: p.card } : {}) })),
       expectedTotal: allCash ? this.cart.cashDue() : this.cart.total(),
     };
     // Same id on every retry: a sale is created at most once even if approvals interrupt it.
     const sale = await this.approvals.run((h) => this.api.sell(body, h));
+    await this.journal.put(sale).catch(() => undefined);
     this.cart.clear();
     this.paying.set(false);
     const receipt = await this.api.receipt(sale.id).catch(() => null);
@@ -478,7 +484,6 @@ export class Sell {
   }
 
   private async completeOffline(payments: PaymentDraft[], id: string, tip: number) {
-    if (this.cart.customer()) throw new OfflineRefused('Customers, points and store credit need a connection. Remove the customer to sell offline.');
     const r = await this.offlineTill.sell(payments, id, tip);
     this.cart.clear();
     this.paying.set(false);
