@@ -22,10 +22,11 @@ import { PromotionsModule } from './modules/promotions/promotions.module.js';
 import { ModifiersModule } from './modules/restaurant/modifiers.module.js';
 import { RestaurantModule } from './modules/restaurant/restaurant.module.js';
 import { PharmacyModule } from './modules/pharmacy/pharmacy.module.js';
+import { BusinessModule } from './modules/business/business.module.js';
 
 @Module({
   imports: [ScheduleModule.forRoot(), ConfigModule, InfraModule, SecurityModule, AuditModule, AccessModule, IdentityModule, BackofficeModule, PlatformModule,
-    SettingsModule, CatalogModule, InventoryModule, SalesModule, ReportingModule, SyncModule, CustomersModule, PromotionsModule, ModifiersModule, RestaurantModule, PharmacyModule],
+    SettingsModule, CatalogModule, InventoryModule, SalesModule, ReportingModule, SyncModule, CustomersModule, PromotionsModule, ModifiersModule, RestaurantModule, PharmacyModule, BusinessModule],
   controllers: [HealthController],
   providers: [{ provide: APP_FILTER, useClass: AppErrorFilter }],
 })

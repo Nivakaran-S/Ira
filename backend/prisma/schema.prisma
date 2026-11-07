@@ -23,13 +23,19 @@ enum UserStatus {
 // ─────────────── Platform tables: no tenantId-based RLS ───────────────
 
 model Plan {
-  id         String   @id @default(uuid(7)) @db.Uuid
-  key        String   @unique
-  name       String
-  maxStores  Int
-  maxDevices Int
-  maxUsers   Int
-  tenants    Tenant[]
+  id           String   @id @default(uuid(7)) @db.Uuid
+  key          String   @unique
+  name         String
+  maxStores    Int
+  maxDevices   Int
+  maxUsers     Int
+  maxProducts  Int      @default(5000)
+  /// Monthly price in minor units of `currency`; 0 = free, no invoices.
+  priceMonthly Int      @default(0)
+  currency     String   @default("LKR")
+  /// Days after an invoice's due date before an unpaid tenant is suspended.
+  graceDays    Int      @default(15)
+  tenants      Tenant[]
 }
 
 model BusinessType {
@@ -50,6 +56,8 @@ model Tenant {
   name            String
   slug            String         @unique
   status          TenantStatus   @default(ACTIVE)
+  /// Why the tenant is suspended: null (manual) or 'billing' (lifted automatically when paid).
+  suspendedReason String?
   businessTypeId  String         @db.Uuid
   planId          String         @db.Uuid
   country         String
@@ -66,6 +74,7 @@ model Tenant {
   stores          Store[]
   users           User[]
   roles           Role[]
+  invoices        Invoice[]
 }
 
 /// Platform-managed. Has tenantId but is read before any tenant context exists (host resolution).
@@ -378,6 +387,10 @@ model Product {
   hasVariants    Boolean                @default(false)
   parentId       String?                @db.Uuid
   variantLabel   String?
+  /// Last purchase cost (minor units); sale lines snapshot it for margins.
+  costPrice      Int                    @default(0)
+  /// Low-stock warning level (thousandths); null = no warning.
+  reorderPoint   Int?
   /// Weighed-items: price per kg, quantities are weights (1 kg = 1000).
   soldByWeight   Boolean                @default(false)
   /// Scale label number.
@@ -584,6 +597,8 @@ model SaleLine {
   /// Modifiers chosen: [{id, name, priceDelta}]; unitPrice and listPrice include them.
   modifiers          Json         @default("[]")
   orderLineId        String?      @db.Uuid
+  /// Product cost when sold, for margin reports.
+  unitCost           Int          @default(0)
   /// Lots this line was taken from: [{batchId, lotNo, expiresOn, qtyMilli}].
   batches            Json         @default("[]")
   prescriptionItemId String?      @db.Uuid
@@ -957,4 +972,158 @@ model PrescriptionItem {
   prescription      Prescription @relation(fields: [tenantId, prescriptionId], references: [tenantId, id], onDelete: Cascade)
 
   @@unique([tenantId, id])
+}
+
+// ---------------- Business ----------------
+
+/// Per-tenant counters for human-friendly document numbers (PO-000001, TR-000001).
+model TenantCounter {
+  tenantId String @db.Uuid
+  key      String
+  value    Int    @default(0)
+
+  @@id([tenantId, key])
+}
+
+/// A store's own price for a product (multi-store); overrides Product.price at that store's tills.
+model StorePrice {
+  tenantId  String   @db.Uuid
+  storeId   String   @db.Uuid
+  productId String   @db.Uuid
+  price     Int
+  updatedAt DateTime @updatedAt
+
+  @@id([storeId, productId])
+  @@index([tenantId, productId])
+}
+
+/// Staff assigned to stores; a till's PIN pad shows the staff of its store (or everyone, if no one is assigned).
+model UserStore {
+  tenantId String @db.Uuid
+  userId   String @db.Uuid
+  storeId  String @db.Uuid
+
+  @@id([userId, storeId])
+}
+
+model Supplier {
+  id          String          @id @default(uuid(7)) @db.Uuid
+  tenantId    String          @db.Uuid
+  name        String
+  contactName String?
+  phone       String?
+  email       String?
+  notes       String?
+  active      Boolean         @default(true)
+  createdAt   DateTime        @default(now())
+  orders      PurchaseOrder[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, name])
+}
+
+enum PurchaseOrderStatus {
+  DRAFT
+  ORDERED
+  PARTIAL
+  RECEIVED
+  CANCELLED
+}
+
+model PurchaseOrder {
+  id          String              @id @default(uuid(7)) @db.Uuid
+  tenantId    String              @db.Uuid
+  number      String
+  supplierId  String              @db.Uuid
+  storeId     String              @db.Uuid
+  status      PurchaseOrderStatus @default(DRAFT)
+  expectedOn  DateTime?           @db.Date
+  note        String?
+  createdById String              @db.Uuid
+  createdAt   DateTime            @default(now())
+  orderedAt   DateTime?
+  closedAt    DateTime?
+  supplier    Supplier            @relation(fields: [tenantId, supplierId], references: [tenantId, id])
+  lines       PurchaseOrderLine[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, number])
+}
+
+model PurchaseOrderLine {
+  id               String        @id @default(uuid(7)) @db.Uuid
+  tenantId         String        @db.Uuid
+  poId             String        @db.Uuid
+  productId        String        @db.Uuid
+  qtyMilli         Int
+  receivedQtyMilli Int           @default(0)
+  unitCost         Int
+  order            PurchaseOrder @relation(fields: [tenantId, poId], references: [tenantId, id], onDelete: Cascade)
+
+  @@unique([tenantId, id])
+}
+
+enum TransferStatus {
+  SENT
+  RECEIVED
+  CANCELLED
+}
+
+model StockTransfer {
+  id           String         @id @default(uuid(7)) @db.Uuid
+  tenantId     String         @db.Uuid
+  number       String
+  fromStoreId  String         @db.Uuid
+  toStoreId    String         @db.Uuid
+  status       TransferStatus @default(SENT)
+  note         String?
+  sentById     String         @db.Uuid
+  sentAt       DateTime       @default(now())
+  receivedById String?        @db.Uuid
+  receivedAt   DateTime?
+  lines        TransferLine[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, number])
+}
+
+model TransferLine {
+  id               String        @id @default(uuid(7)) @db.Uuid
+  tenantId         String        @db.Uuid
+  transferId       String        @db.Uuid
+  productId        String        @db.Uuid
+  qtyMilli         Int
+  receivedQtyMilli Int?
+  /// Lots taken at the sending store: [{batchId, lotNo, expiresOn, qtyMilli}].
+  batches          Json          @default("[]")
+  transfer         StockTransfer @relation(fields: [tenantId, transferId], references: [tenantId, id], onDelete: Cascade)
+
+  @@unique([tenantId, id])
+}
+
+enum InvoiceStatus {
+  DUE
+  PAID
+  VOID
+}
+
+/// Platform billing. Has tenantId but is platform-managed (like Domain); tenants read their own through the API.
+model Invoice {
+  id          String        @id @default(uuid(7)) @db.Uuid
+  tenantId    String        @db.Uuid
+  number      String        @unique
+  planKey     String
+  periodStart DateTime      @db.Date
+  periodEnd   DateTime      @db.Date
+  amount      Int
+  currency    String
+  status      InvoiceStatus @default(DUE)
+  issuedAt    DateTime      @default(now())
+  dueOn       DateTime      @db.Date
+  paidAt      DateTime?
+  paidRef     String?
+  tenant      Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, periodStart])
+  @@index([status, dueOn])
 }

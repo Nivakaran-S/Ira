@@ -8,6 +8,7 @@ import type { Tx } from '../../infra/prisma.service.js';
 import { TenantDb } from '../../infra/tenant-db.service.js';
 import type { auditContext } from '../audit/audit-context.js';
 import { AuditService } from '../audit/audit.service.js';
+import { PlanLimitsService } from '../access/plan-limits.service.js';
 
 type Ctx = ReturnType<typeof auditContext>;
 
@@ -22,6 +23,13 @@ export function taxStack(group: GroupWithRates | null | undefined): TaxRateDef[]
     .map((r) => ({ id: r.rate.id, name: r.rate.name, rateBp: r.rate.rateBp, compound: r.rate.compound }));
 }
 
+/** The prices a register's store has set for itself (multi-store), by product. */
+export async function storePrices(tx: Tx, registerId: string): Promise<Map<string, number>> {
+  const reg = await tx.register.findUnique({ where: { id: registerId }, select: { storeId: true } });
+  if (!reg) return new Map();
+  return new Map((await tx.storePrice.findMany({ where: { storeId: reg.storeId } })).map((sp) => [sp.productId, sp.price]));
+}
+
 export const productInclude = { taxGroup: { include: groupInclude } } as const satisfies Prisma.ProductInclude;
 export type ProductWithTax = Prisma.ProductGetPayload<{ include: typeof productInclude }>;
 
@@ -30,6 +38,7 @@ export class CatalogService {
   constructor(
     private readonly tenantDb: TenantDb,
     private readonly audit: AuditService,
+    private readonly limits: PlanLimitsService,
   ) {}
 
   // ── tax rates ──
@@ -151,6 +160,7 @@ export class CatalogService {
       if (!parent.hasVariants) await tx.product.update({ where: { id: parentId }, data: { hasVariants: true } });
       const created = [];
       for (const v of input.variants) {
+        await this.limits.assertCanAdd(tx, tenant, 'products');
         const p = await tx.product.create({
           data: {
             tenantId: tenant.id, parentId, variantLabel: v.variantLabel, name: `${parent.name} - ${v.variantLabel}`, sku: v.sku ?? null,
@@ -210,6 +220,7 @@ export class CatalogService {
   createProduct(tenant: TenantContext, ctx: Ctx, input: z.infer<typeof ProductSchema>) {
     return this.tenantDb.run(tenant.id, async (tx) => {
       await this.assertRefs(tx, input);
+      await this.limits.assertCanAdd(tx, tenant, 'products');
       const p = await tx.product.create({ data: { tenantId: tenant.id, ...input } });
       await this.audit.record(tx, tenant.id, { ...ctx, action: 'product.created', entityType: 'Product', entityId: p.id, after: input });
       return p;
@@ -231,8 +242,9 @@ export class CatalogService {
   }
 
   /** Everything a till needs to ring up sales: active products with their resolved tax stack. */
-  posCatalog(tenant: TenantContext) {
+  posCatalog(tenant: TenantContext, registerId?: string) {
     return this.tenantDb.run(tenant.id, async (tx) => {
+      const prices = registerId ? await storePrices(tx, registerId) : new Map<string, number>();
       const [categories, products] = await Promise.all([
         tx.category.findMany({ orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }], select: { id: true, name: true, color: true } }),
         tx.product.findMany({ where: { active: true }, orderBy: { name: 'asc' }, include: { ...productInclude, barcodes: { select: { code: true } } } }),
@@ -240,7 +252,7 @@ export class CatalogService {
       return {
         categories,
         products: products.map((p) => ({
-          id: p.id, name: p.name, sku: p.sku, price: p.price, categoryId: p.categoryId, trackStock: p.trackStock, taxes: taxStack(p.taxGroup),
+          id: p.id, name: p.name, sku: p.sku, price: prices.get(p.id) ?? p.price, categoryId: p.categoryId, trackStock: p.trackStock, taxes: taxStack(p.taxGroup),
           hasVariants: p.hasVariants, parentId: p.parentId, variantLabel: p.variantLabel, barcodes: p.barcodes.map((b) => b.code),
           soldByWeight: p.soldByWeight, plu: p.plu, tracksBatches: p.tracksBatches, rxRequired: p.rxRequired,
         })),

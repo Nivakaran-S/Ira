@@ -13,6 +13,21 @@ Multi-tenant, zero-trust point-of-sale SaaS. Design: `docs/superpowers/specs/202
 | `infra/` | Docker Compose: Postgres, Redis, Caddy edge |
 | `docs/` | Specs and implementation plans |
 
+## What it does
+
+| Milestone | Features | Notes |
+|---|---|---|
+| 1 Foundation | Tenants, domains, business types, modules; passwords, MFA, PINs; device enrolment and request signing; audit log | `specs/2026-11-02-*` |
+| 2 Core POS | Catalog, VAT/SSCL tax engine, cash/card/split payments, receipts, shifts and Z reports, voids and refunds with manager approval, reports | `specs/2026-11-07-m2-core-pos.md` |
+| 3 Offline | PWA, encrypted local store, down-sync, signed hash-chained outbox, offline PIN sign-in and approvals, quarantine review | `specs/2026-11-07-m3-offline.md` |
+| 4 Retail | Variants, barcodes and scanning, promotions, encrypted customers, loyalty points, store credit | `specs/2026-11-07-m4-retail.md` |
+| 5 Restaurant | Modifiers, tables and open orders, kitchen display, split bills, tips | `specs/2026-11-07-m5-restaurant.md` |
+| 6 Grocery and pharmacy | Weighed items, scale labels and scales, lots with expiry (FEFO, recall), prescriptions | `specs/2026-11-07-m6-grocery-pharmacy.md` |
+| 7 Business | Multi-store and store prices, purchasing, stock transfers, margin and stock insights, CSV, plans and billing | `specs/2026-11-07-m7-business.md` |
+
+Features are switched on per tenant by modules (business type plus console overrides); the API refuses
+disabled modules and the apps hide them.
+
 ## Run it locally
 
 Requires Node ≥ 22 and Docker.
@@ -23,7 +38,7 @@ Requires Node ≥ 22 and Docker.
     npm run build:shared
     npm run prisma:generate -w backend     # generates backend/src/generated/prisma (git-ignored)
     cd backend && npx prisma migrate deploy && cd ..
-    npm run db:seed -w backend             # plan "standard" + retail/cafe/grocery/pharmacy
+    npm run db:seed -w backend             # plans standard/business + retail/cafe/grocery/pharmacy/retail-chain
     npm run platform:create-admin -w backend -- --email you@example.com --name "Your Name"
     npm run dev:api                        # http://localhost:3000/api/health
 
@@ -44,7 +59,13 @@ on the till.
 Receipt printer (optional): on the till computer run `npm run dev:bridge` (prints to the console) or copy
 `hardware-bridge/bridge.config.example.json` to `bridge.config.json` with your printer and run
 `node hardware-bridge/dist/main.js`. Pair it from the till's Shift tab with the 6-digit code the bridge prints.
-Without a bridge the till prints through the browser.
+Without a bridge the till prints through the browser. A scale can be added to the bridge config:
+`{ "type": "tcp", "host": "...", "port": 4001 }`, or `{ "type": "serial", "path": "COM3" }` after
+`npm install serialport -w hardware-bridge` on that till.
+
+The till works offline once it has synced: production builds (`npm run build -w frontend`) include a service
+worker for the app shell; in dev the app still needs the dev server. Billing runs daily at 02:00 (Colombo);
+super admins can run it at once from Console → Invoices.
 
 Optional TLS edge (Caddy, internal CA): `docker compose -f infra/docker-compose.yml --profile edge up -d caddy`.
 It forwards `/api` to :3000, `/pos/*` to :4201 and the rest to :4200; start the dev servers with
@@ -52,17 +73,20 @@ It forwards `/api` to :3000, `/pos/*` to :4201 and the rest to :4200; start the 
 
 ## Test
 
-    npm test            # shared + backend + frontend unit tests (needs infra:up)
+    npm test            # shared + bridge + backend + frontend unit tests (needs infra:up)
     npm run e2e         # Playwright: each milestone's flow in a browser against the real API
 
 The backend suite runs against the `pos_test` database and Redis DB 1. Notable suites:
 `rls.spec.ts` (database-level isolation and the "every tenantId table has RLS" guard),
 `leakage.e2e.spec.ts` (API-level cross-tenant isolation), `audit.spec.ts` (tamper-evident log),
-`pos.e2e.spec.ts` (selling, approvals, refunds, shifts). The pricing engine's tests are in `shared/src/pricing.spec.ts`.
+`pos.e2e.spec.ts` (selling, approvals, refunds, shifts), `sync.e2e.spec.ts` (offline chain, quarantine),
+`retail`, `restaurant`, `grocery-pharmacy` and `business` suites per milestone. The pricing, promotions,
+modifier, FEFO and scale-label engines are tested in `shared/src/*.spec.ts`.
 
 The E2E suite (`frontend/e2e`) uses the dev database with fresh slugs per run, creates its own super
 admin through the real CLI, and starts the API and both dev servers if they are not already running.
-First time only: `npm exec -w frontend -- playwright install chromium`.
+First time only: `npm exec -w frontend -- playwright install chromium`. `npm run e2e` clears the Vite
+dependency cache first, because a stale prebuilt `@pos/shared` otherwise serves old exports.
 
 ## Security model in one paragraph
 
@@ -78,3 +102,8 @@ action lands in a per-tenant hash-chained audit log the app role cannot update o
 1. Give it `tenantId` and `@@unique([tenantId, id])`; relate to other tenant tables with composite keys.
 2. Add it to an RLS block in a new migration (copy `prisma/migrations/*_rls/migration.sql`).
 3. `rls.spec.ts` fails until you do.
+
+Migrations are written as SQL and applied with `prisma migrate deploy`. `prisma migrate diff` is a
+useful starting point, but it does not know the `sync_version` sequence or the hand-written composite
+foreign keys (constraint names without `tenantId`) and will try to drop them; remove those lines.
+Tables the tills down-sync carry a `version` column from `sync_version` with an update trigger.

@@ -41,6 +41,7 @@ export interface User {
   status: string;
   roles: { id: string; name: string }[];
   hasPin: boolean;
+  storeIds?: string[];
 }
 export interface Device {
   id: string;
@@ -105,6 +106,9 @@ export class BackofficeApi {
   }
   createUser(input: { name: string; email?: string; roleIds: string[]; pin?: string }) {
     return firstValueFrom(this.http.post<{ user: User; setupCode: string | null }>('/api/users', input));
+  }
+  setUserStores(userId: string, storeIds: string[]) {
+    return firstValueFrom(this.http.put(`/api/users/${userId}/stores`, { storeIds }));
   }
   setPin(userId: string, pin: string) {
     return firstValueFrom(this.http.put<void>(`/api/users/${userId}/pin`, { pin }));

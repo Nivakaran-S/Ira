@@ -16,7 +16,7 @@ import { type DevicePublicJwk, verifyDeviceSignature } from '../../security/devi
 import { CapabilitiesService } from '../access/capabilities.service.js';
 import type { auditContext } from '../audit/audit-context.js';
 import { AuditService } from '../audit/audit.service.js';
-import { taxStack } from '../catalog/catalog.service.js';
+import { storePrices, taxStack } from '../catalog/catalog.service.js';
 import { type Approval, approvalNeeds, appliedPromotions, SalesService, settlePayments } from '../sales/sales.service.js';
 import { ShiftsService } from '../sales/shifts.service.js';
 import { SettingsService } from '../settings/settings.service.js';
@@ -96,6 +96,7 @@ export class SyncService {
         cursor, ...categories.map((c) => c.version), ...products.map((p) => p.version), ...groups.map((g) => g.version),
         ...barcodes.map((b) => b.version), ...promotions.map((p) => p.version), ...modifierGroups.map((g) => g.version),
       ];
+      const prices = await storePrices(tx, device.registerId);
       const links = products.length
         ? await tx.productModifierGroup.findMany({ where: { productId: { in: products.map((p) => p.id) } }, orderBy: { position: 'asc' } })
         : [];
@@ -104,7 +105,7 @@ export class SyncService {
         ? await tx.barcode.findMany({ where: { productId: { in: products.map((p) => p.id) } }, select: { code: true, productId: true } })
         : [];
       return {
-        register, block, categories, products, groups, users, barcodes: [...barcodes, ...productBarcodes], promotions, modifierGroups, links,
+        register, block, categories, products: products.map((p) => ({ ...p, price: prices.get(p.id) ?? p.price })), groups, users, barcodes: [...barcodes, ...productBarcodes], promotions, modifierGroups, links,
         shift: shift ? await this.shifts.report(tx, shift.id) : null,
         next: versions.reduce((m, v) => (v > m ? v : m), cursor),
       };
@@ -295,7 +296,8 @@ export class SyncService {
       if (!(await tx.user.count({ where: { id: s.cashierId } }))) throw new Reject('UNKNOWN_USER', { userId: s.cashierId });
       const cv = BigInt(s.catalogVersion);
       const products = await tx.product.findMany({ where: { id: { in: [...new Set(s.lines.map((l) => l.productId))] } }, include: { taxGroup: { include: { rates: { orderBy: { position: 'asc' }, include: { rate: true } } } } } });
-      const byId = new Map(products.map((p) => [p.id, p]));
+      const prices = await storePrices(tx, device.registerId);
+      const byId = new Map(products.map((p) => [p.id, { ...p, price: prices.get(p.id) ?? p.price }]));
       const modGroups = await this.modifierService.forProducts(tx, [...byId.keys()]);
       for (const l of s.lines) {
         const p = byId.get(l.productId);
@@ -357,7 +359,7 @@ export class SyncService {
           const p = byId.get(l.productId)!;
           return {
             productId: p.id, name: p.name, sku: p.sku, unitPrice: l.unitPrice, listPrice: l.listPrice, qtyMilli: l.qtyMilli, note: l.note, trackStock: p.trackStock,
-            modifiers: l.modifiers ?? [], tracksBatches: p.tracksBatches,
+            modifiers: l.modifiers ?? [], tracksBatches: p.tracksBatches, unitCost: p.costPrice,
           };
         }),
       }, { ...auditCtx, actorUserId: s.cashierId });

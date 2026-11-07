@@ -104,6 +104,14 @@ import { Money } from './money';
             <input id="p-codes" [value]="barcodes()" (input)="barcodes.set(val($event))" />
           </ui-field>
         }
+        <div class="grid-2">
+          <ui-field label="Cost price" for="p-cost" hint="Updated by purchase orders; used for margins.">
+            <input id="p-cost" inputmode="decimal" [value]="cost()" (input)="cost.set(val($event))" />
+          </ui-field>
+          <ui-field label="Reorder at (quantity)" for="p-reorder" hint="Low-stock warning level. Blank = none.">
+            <input id="p-reorder" inputmode="decimal" [value]="reorder()" (input)="reorder.set(val($event))" />
+          </ui-field>
+        </div>
         @if (has('weighed-items')) {
           <div class="row">
             <label class="check"><input type="checkbox" data-testid="sold-by-weight" [checked]="soldByWeight()" (change)="soldByWeight.set(checked($event))" /> Sold by weight (price per kg)</label>
@@ -163,6 +171,8 @@ export class Catalog {
   });
   protected readonly groupIds = signal<string[]>([]);
   protected readonly soldByWeight = signal(false);
+  protected readonly cost = signal('');
+  protected readonly reorder = signal('');
   protected readonly plu = signal('');
   protected readonly tracksBatches = signal(false);
   protected readonly rxRequired = signal(false);
@@ -259,6 +269,8 @@ export class Catalog {
     this.barcodes.set('');
     this.groupIds.set([]);
     this.soldByWeight.set(false);
+    this.cost.set('');
+    this.reorder.set('');
     this.plu.set('');
     this.tracksBatches.set(false);
     this.rxRequired.set(false);
@@ -278,6 +290,8 @@ export class Catalog {
     this.active.set(p.active);
     this.barcodes.set(this.codes(p));
     this.soldByWeight.set(!!p.soldByWeight);
+    this.cost.set(p.costPrice ? this.money.fmt(p.costPrice).replace(/,/g, '') : '');
+    this.reorder.set(p.reorderPoint != null ? String(p.reorderPoint / 1000) : '');
     this.plu.set(p.plu ?? '');
     this.tracksBatches.set(!!p.tracksBatches);
     this.rxRequired.set(!!p.rxRequired);
@@ -297,6 +311,8 @@ export class Catalog {
       taxGroupId: this.taxGroupId() || null,
       trackStock: this.trackStock(),
       active: this.active(),
+      ...(this.cost().trim() && this.money.parse(this.cost()) !== null ? { costPrice: this.money.parse(this.cost())! } : {}),
+      reorderPoint: this.reorder().trim() ? Math.round(Number(this.reorder()) * 1000) : null,
       ...(this.has('weighed-items') ? { soldByWeight: this.soldByWeight(), plu: this.plu().trim() || null } : {}),
       ...(this.has('batch-expiry') ? { tracksBatches: this.tracksBatches() } : {}),
       ...(this.has('prescriptions') ? { rxRequired: this.rxRequired() } : {}),

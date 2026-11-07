@@ -3,7 +3,7 @@ import { AppError } from '../../common/errors/app-error.js';
 import type { TenantContext } from '../../common/request-context.js';
 import { PrismaService, type Tx } from '../../infra/prisma.service.js';
 
-export type LimitedResource = 'stores' | 'devices' | 'users';
+export type LimitedResource = 'stores' | 'devices' | 'users' | 'products';
 
 @Injectable()
 export class PlanLimitsService {
@@ -20,6 +20,9 @@ export class PlanLimitsService {
     } else if (resource === 'devices') {
       count = await tx.device.count({ where: { revokedAt: null } });
       max = plan.maxDevices;
+    } else if (resource === 'products') {
+      count = await tx.product.count({ where: { hasVariants: false } });
+      max = plan.maxProducts;
     } else {
       count = await tx.user.count({ where: { status: 'ACTIVE' } });
       max = plan.maxUsers;

@@ -39,7 +39,12 @@ import { BackofficeSession } from './session';
                   <td class="small">{{ roleNames(u) }}</td>
                   <td>@if (u.hasPin) { <ui-badge tone="ok">Set</ui-badge> } @else { <span class="muted">—</span> }</td>
                   <td><ui-badge [tone]="u.status === 'ACTIVE' ? 'ok' : 'neutral'">{{ u.status === 'ACTIVE' ? 'Active' : 'Disabled' }}</ui-badge></td>
-                  <td><button class="btn small" type="button" (click)="pinFor.set(u)">Set PIN</button></td>
+                  <td class="row">
+                    <button class="btn small" type="button" (click)="pinFor.set(u)">Set PIN</button>
+                    @if (session.modules().includes('multi-store')) {
+                      <button class="btn small" type="button" [attr.data-stores-for]="u.name" (click)="openStores(u)">Stores</button>
+                    }
+                  </td>
                 </tr>
               }
             </tbody>
@@ -72,6 +77,16 @@ import { BackofficeSession } from './session';
         }
         <div><button class="btn primary" type="submit" [disabled]="busy() || !valid()">Create user</button></div>
       </form>
+    </ui-dialog>
+
+    <ui-dialog [title]="'Stores for ' + (storesFor()?.name ?? '')" [open]="!!storesFor()" (closed)="storesFor.set(null)">
+      <div class="stack">
+        <p class="small muted">Leave all unticked to let this person sign in at every store.</p>
+        @for (s of stores.value() ?? []; track s.id) {
+          <label class="check"><input type="checkbox" [checked]="storeIds().includes(s.id)" (change)="toggleStore(s.id, checked($event))" /> {{ s.code }} · {{ s.name }}</label>
+        }
+        <div><button class="btn primary" type="button" (click)="saveStores()">Save</button></div>
+      </div>
     </ui-dialog>
 
     <ui-dialog [title]="'Set PIN for ' + (pinFor()?.name ?? '')" [open]="!!pinFor()" (closed)="pinFor.set(null)">
@@ -109,6 +124,28 @@ export class Users {
   protected readonly created = signal<{ name: string; setupCode: string | null } | null>(null);
   protected readonly pinFor = signal<User | null>(null);
   protected readonly newPin = signal('');
+  protected readonly storesFor = signal<User | null>(null);
+  protected readonly storeIds = signal<string[]>([]);
+  protected readonly stores = apiResource({ loader: () => this.api.stores() });
+  protected openStores(u: User) {
+    this.storeIds.set(u.storeIds ?? []);
+    this.storesFor.set(u);
+  }
+  protected toggleStore(id: string, on: boolean) {
+    this.storeIds.update((ids) => (on ? [...ids, id] : ids.filter((x) => x !== id)));
+  }
+  protected async saveStores() {
+    const u = this.storesFor();
+    if (!u) return;
+    try {
+      await this.api.setUserStores(u.id, this.storeIds());
+      this.toasts.success('Stores saved');
+      this.storesFor.set(null);
+      this.users.reload();
+    } catch (e) {
+      this.toasts.error(humanMessage(toApiError(e)));
+    }
+  }
 
   protected readonly valid = computed(() => !!this.name().trim() && this.roleIds().length > 0 && (this.pin() === '' || this.pinValid(this.pin())));
 

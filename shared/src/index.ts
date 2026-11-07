@@ -20,3 +20,4 @@ export * from './schemas/retail.js';
 export * from './schemas/restaurant.js';
 export * from './scale-barcode.js';
 export * from './schemas/grocery.js';
+export * from './schemas/business.js';

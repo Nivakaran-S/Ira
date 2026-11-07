@@ -23,6 +23,9 @@ export const PERMISSIONS = [
   'kitchen.view',
   'table.manage',
   'prescription.dispense',
+  'purchasing.manage',
+  'stock.transfer',
+  'billing.view',
 ] as const;
 
 export type Permission = (typeof PERMISSIONS)[number];

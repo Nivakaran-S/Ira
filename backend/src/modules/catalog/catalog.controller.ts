@@ -149,7 +149,7 @@ export class PosCatalogController {
   @RequiresPermission('sale.create')
   @Get('catalog')
   async get(@Req() req: RequestWithContext) {
-    const [profile, catalog] = await Promise.all([this.settings.profile(req.tenant!.id), this.catalog.posCatalog(req.tenant!)]);
+    const [profile, catalog] = await Promise.all([this.settings.profile(req.tenant!.id), this.catalog.posCatalog(req.tenant!, req.device!.registerId)]);
     return { currency: profile.currency, settings: profile.settings, ...catalog };
   }
 }

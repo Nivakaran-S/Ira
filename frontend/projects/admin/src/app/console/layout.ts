@@ -12,6 +12,8 @@ import { AuthStore } from '../core/auth-store';
       <ng-container nav>
         <a routerLink="/tenants" routerLinkActive="active">Tenants</a>
         <a routerLink="/business-types" routerLinkActive="active">Business types</a>
+        <a routerLink="/plans" routerLinkActive="active">Plans</a>
+        <a routerLink="/invoices" routerLinkActive="active">Invoices</a>
       </ng-container>
       <div foot class="muted">Super admin</div>
       <ng-container toolbar>

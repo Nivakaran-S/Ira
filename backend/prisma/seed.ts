@@ -19,13 +19,14 @@ const businessTypes = [
   { key: 'cafe', name: 'Café / Restaurant', modules: ['core', 'customers', 'tables', 'modifiers', 'kitchen-display', 'split-bill'] },
   { key: 'grocery', name: 'Grocery', modules: ['core', 'customers', 'barcodes', 'promotions', 'weighed-items'] },
   { key: 'pharmacy', name: 'Pharmacy', modules: ['core', 'customers', 'barcodes', 'batch-expiry', 'prescriptions'] },
+  { key: 'retail-chain', name: 'Retail chain', modules: ['core', 'customers', 'variants', 'barcodes', 'promotions', 'loyalty', 'multi-store', 'purchasing'] },
 ];
 
-await prisma.plan.upsert({
-  where: { key: 'standard' },
-  update: {},
-  create: { key: 'standard', name: 'Standard', maxStores: 3, maxDevices: 10, maxUsers: 25 },
-});
+const plans = [
+  { key: 'standard', name: 'Standard', maxStores: 3, maxDevices: 10, maxUsers: 25, maxProducts: 5_000, priceMonthly: 0, currency: 'LKR', graceDays: 15 },
+  { key: 'business', name: 'Business', maxStores: 20, maxDevices: 100, maxUsers: 300, maxProducts: 100_000, priceMonthly: 2_500_000, currency: 'LKR', graceDays: 15 },
+];
+for (const plan of plans) await prisma.plan.upsert({ where: { key: plan.key }, update: {}, create: plan });
 
 for (const raw of businessTypes) {
   const bt = BusinessTypeSchema.parse({ ...raw, roleTemplates: [manager, cashier] });
@@ -43,4 +44,4 @@ for (const raw of businessTypes) {
 }
 
 await prisma.$disconnect();
-console.log('Seeded plan "standard" and business types:', businessTypes.map((b) => b.key).join(', '));
+console.log('Seeded plans standard, business and business types:', businessTypes.map((b) => b.key).join(', '));

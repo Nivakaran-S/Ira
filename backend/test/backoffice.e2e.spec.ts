@@ -44,6 +44,8 @@ describe('back-office', () => {
 
     it('duplicate store codes conflict', async () => {
       await ownerDb().plan.updateMany({ data: { maxStores: 5 } });
+      await ownerDb().tenantModule.create({ data: { tenantId, moduleKey: 'multi-store', enabled: true } });
+      await flushRedis();
       await asOwner(http().post('/api/stores')).send({ name: 'A', code: 'AAA' }).expect(201);
       await asOwner(http().post('/api/stores')).send({ name: 'B', code: 'AAA' }).expect(409);
     });

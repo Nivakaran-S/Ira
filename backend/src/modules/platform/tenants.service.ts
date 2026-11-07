@@ -126,7 +126,7 @@ export class TenantsService {
   async setStatus(id: string, status: 'ACTIVE' | 'SUSPENDED', ctx: Ctx) {
     const before = await this.get(id);
     await this.prisma.$transaction(async (tx) => {
-      await tx.tenant.update({ where: { id }, data: { status } });
+      await tx.tenant.update({ where: { id }, data: { status, suspendedReason: null } });
       await this.audit.recordPlatform(tx, {
         ...ctx, action: 'tenant.status_changed', entityType: 'Tenant', entityId: id, before: { status: before.status }, after: { status },
       });

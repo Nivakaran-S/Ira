@@ -10,6 +10,8 @@ export const CONSOLE_ROUTES: Routes = [
       { path: 'tenants', title: 'Tenants', loadComponent: () => import('./tenants-list').then((m) => m.TenantsList) },
       { path: 'tenants/new', title: 'New tenant', loadComponent: () => import('./tenant-new').then((m) => m.TenantNew) },
       { path: 'tenants/:id', title: 'Tenant', loadComponent: () => import('./tenant-detail').then((m) => m.TenantDetail) },
+      { path: 'plans', title: 'Plans', loadComponent: () => import('./plans').then((m) => m.Plans) },
+      { path: 'invoices', title: 'Invoices', loadComponent: () => import('./invoices').then((m) => m.Invoices) },
       { path: 'business-types', title: 'Business types', loadComponent: () => import('./business-types').then((m) => m.BusinessTypes) },
     ],
   },

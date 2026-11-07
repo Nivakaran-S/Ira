@@ -87,8 +87,10 @@ export class UsersService {
   }
 
   async list(tenant: TenantContext) {
-    const users = await this.tenantDb.run(tenant.id, (tx) => tx.user.findMany({ orderBy: { name: 'asc' }, select: publicUserSelect }));
-    return users.map(toPublicUser);
+    const [users, stores] = await this.tenantDb.run(tenant.id, (tx) =>
+      Promise.all([tx.user.findMany({ orderBy: { name: 'asc' }, select: publicUserSelect }), tx.userStore.findMany()]),
+    );
+    return users.map((u) => ({ ...toPublicUser(u), storeIds: stores.filter((s) => s.userId === u.id).map((s) => s.storeId) }));
   }
 
   async setPin(tenant: TenantContext, principal: Principal, ctx: Ctx, userId: string, pin: string) {
@@ -104,9 +106,29 @@ export class UsersService {
     });
   }
 
-  pinPad(tenant: TenantContext) {
-    return this.tenantDb.run(tenant.id, (tx) =>
-      tx.user.findMany({ where: { status: 'ACTIVE', pinHash: { not: null } }, orderBy: { name: 'asc' }, select: { id: true, name: true } }),
-    );
+  pinPad(tenant: TenantContext, registerId?: string) {
+    return this.tenantDb.run(tenant.id, async (tx) => {
+      const users = await tx.user.findMany({ where: { status: 'ACTIVE', pinHash: { not: null } }, orderBy: { name: 'asc' }, select: { id: true, name: true } });
+      if (!registerId) return users;
+      // Multi-store: people assigned to stores only appear on their stores' tills.
+      const storeId = (await tx.register.findUniqueOrThrow({ where: { id: registerId }, select: { storeId: true } })).storeId;
+      const assignments = await tx.userStore.findMany({ where: { userId: { in: users.map((u) => u.id) } } });
+      return users.filter((u) => {
+        const mine = assignments.filter((a) => a.userId === u.id);
+        return !mine.length || mine.some((a) => a.storeId === storeId);
+      });
+    });
+  }
+
+  setStores(tenant: TenantContext, ctx: ReturnType<typeof auditContext>, userId: string, storeIds: string[]) {
+    return this.tenantDb.run(tenant.id, async (tx) => {
+      if (!(await tx.user.findUnique({ where: { id: userId } }))) throw AppError.notFound('User not found');
+      const ids = [...new Set(storeIds)];
+      if ((await tx.store.count({ where: { id: { in: ids } } })) !== ids.length) throw AppError.notFound('Store not found');
+      await tx.userStore.deleteMany({ where: { userId } });
+      if (ids.length) await tx.userStore.createMany({ data: ids.map((storeId) => ({ tenantId: tenant.id, userId, storeId })) });
+      await this.audit.record(tx, tenant.id, { ...ctx, action: 'user.stores_set', entityType: 'User', entityId: userId, after: { storeIds: ids } });
+      return { storeIds: ids };
+    });
   }
 }

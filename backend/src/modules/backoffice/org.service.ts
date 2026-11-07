@@ -5,6 +5,7 @@ import { AppError } from '../../common/errors/app-error.js';
 import type { TenantContext } from '../../common/request-context.js';
 import { TenantDb } from '../../infra/tenant-db.service.js';
 import { PlanLimitsService } from '../access/plan-limits.service.js';
+import { CapabilitiesService } from '../access/capabilities.service.js';
 import type { auditContext } from '../audit/audit-context.js';
 import { AuditService } from '../audit/audit.service.js';
 
@@ -16,11 +17,15 @@ export class OrgService {
     private readonly tenantDb: TenantDb,
     private readonly limits: PlanLimitsService,
     private readonly audit: AuditService,
+    private readonly capabilities: CapabilitiesService,
   ) {}
 
   createStore(tenant: TenantContext, ctx: Ctx, input: z.infer<typeof CreateStoreSchema>) {
     return this.tenantDb.run(tenant.id, async (tx) => {
       await this.limits.assertCanAdd(tx, tenant, 'stores');
+      if ((await tx.store.count()) >= 1 && !(await this.capabilities.modulesFor(tenant)).includes('multi-store')) {
+        throw new AppError('MODULE_DISABLED', 403, 'A second store needs the multi-store module', { module: 'multi-store' });
+      }
       const store = await tx.store.create({ data: { tenantId: tenant.id, ...input } });
       await this.audit.record(tx, tenant.id, { ...ctx, action: 'store.created', entityType: 'Store', entityId: store.id, after: input });
       return store;

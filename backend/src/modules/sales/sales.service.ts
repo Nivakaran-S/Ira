@@ -16,7 +16,7 @@ import { CapabilitiesService } from '../access/capabilities.service.js';
 import { StepUpGate } from '../access/step-up-gate.js';
 import { auditContext } from '../audit/audit-context.js';
 import { type AuditEntry, AuditService } from '../audit/audit.service.js';
-import { productInclude, taxStack } from '../catalog/catalog.service.js';
+import { productInclude, storePrices, taxStack } from '../catalog/catalog.service.js';
 import { LedgersService } from '../customers/ledgers.service.js';
 import { InventoryService } from '../inventory/inventory.service.js';
 import { PromotionsService } from '../promotions/promotions.service.js';
@@ -115,7 +115,7 @@ export interface SaleRecord {
   lines: {
     productId: string; name: string; sku: string | null; unitPrice: number; listPrice: number; qtyMilli: number; note?: string; trackStock: boolean;
     modifiers?: { id: string; name: string; priceDelta: number }[]; orderLineId?: string | null;
-    tracksBatches?: boolean; rxRequired?: boolean; prescriptionItemId?: string | null;
+    tracksBatches?: boolean; rxRequired?: boolean; prescriptionItemId?: string | null; unitCost?: number;
   }[];
 }
 
@@ -228,13 +228,16 @@ export class SalesService {
     const wantsModifiers = input.lines.some((l) => l.modifierIds?.length);
     if (wantsModifiers && !modules.includes('modifiers')) throw new AppError('MODULE_DISABLED', 403, 'Module modifiers is not enabled', { module: 'modifiers' });
     const productIds = [...new Set(input.lines.map((l) => l.productId))];
-    const { products, promos, customerOk, groups } = await this.tenantDb.run(tenant.id, async (tx) => ({
+    const { products: rawProducts, promos, customerOk, groups, prices } = await this.tenantDb.run(tenant.id, async (tx) => ({
+      prices: await storePrices(tx, device.registerId),
       products: await tx.product.findMany({ where: { id: { in: productIds }, active: true }, include: productInclude }),
       promos: modules.includes('promotions') ? await this.promotions.live(tx) : [],
       customerOk: input.customerId ? !!(await tx.customer.findUnique({ where: { id: input.customerId } })) : true,
       groups: modules.includes('modifiers') ? await this.modifiers.forProducts(tx, productIds) : new Map(),
     }));
     if (!customerOk) throw AppError.notFound('Customer not found');
+    // A store's own price replaces the catalog price at its tills.
+    const products = rawProducts.map((p) => ({ ...p, price: prices.get(p.id) ?? p.price }));
     const byId = new Map(products.map((p) => [p.id, p]));
     const missing = input.lines.filter((l) => !byId.has(l.productId)).map((l) => l.productId);
     if (missing.length) throw new AppError('NOT_FOUND', 404, 'Product not found or inactive', { productIds: [...new Set(missing)] });
@@ -299,7 +302,7 @@ export class SalesService {
           return {
             productId: p.id, name: p.name, sku: p.sku, unitPrice: l.unitPrice ?? listPrice(i), listPrice: listPrice(i), qtyMilli: l.qtyMilli, note: l.note,
             trackStock: p.trackStock, modifiers: chosen[i], orderLineId: orderPay?.lines[i]?.orderLineId ?? null,
-            tracksBatches: p.tracksBatches, rxRequired: rxOn && p.rxRequired, prescriptionItemId: l.prescriptionItemId ?? null,
+            tracksBatches: p.tracksBatches, rxRequired: rxOn && p.rxRequired, prescriptionItemId: l.prescriptionItemId ?? null, unitCost: p.costPrice,
           };
         }),
       }, auditContext(req));
@@ -357,7 +360,7 @@ export class SalesService {
               position: i, productId: src.productId, name: src.name, sku: src.sku, unitPrice: src.unitPrice, listPrice: src.listPrice,
               qtyMilli: src.qtyMilli, gross: l.gross, discount: l.discount, discounts: json(l.discounts), net: l.net, tax: l.tax,
               taxes: json(l.taxes), total: l.total, note: src.note ?? null, modifiers: json(src.modifiers ?? []), orderLineId: src.orderLineId ?? null,
-              batches: json(lineBatches.get(i)?.takes ?? []), prescriptionItemId: src.prescriptionItemId ?? null,
+              batches: json(lineBatches.get(i)?.takes ?? []), prescriptionItemId: src.prescriptionItemId ?? null, unitCost: src.unitCost ?? 0,
             };
           }),
         },

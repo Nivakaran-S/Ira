@@ -1,9 +1,9 @@
 import { Body, Controller, Get, HttpCode, Param, ParseUUIDPipe, Post, Put, Req } from '@nestjs/common';
-import { CreateUserSchema, SetPinSchema } from '@pos/shared';
+import { CreateUserSchema, SetPinSchema, UserStoresSchema } from '@pos/shared';
 import type { z } from 'zod';
 import type { RequestWithContext } from '../../common/request-context.js';
 import { ZodPipe } from '../../common/zod.pipe.js';
-import { Public, RequiresDevice, RequiresPermission } from '../access/decorators.js';
+import { Public, RequiresDevice, RequiresModule, RequiresPermission } from '../access/decorators.js';
 import { auditContext } from '../audit/audit-context.js';
 import { UsersService } from './users.service.js';
 
@@ -28,7 +28,14 @@ export class UsersController {
   @RequiresDevice()
   @Get('pin-pad')
   pinPad(@Req() req: RequestWithContext) {
-    return this.users.pinPad(req.tenant!);
+    return this.users.pinPad(req.tenant!, req.device!.registerId);
+  }
+
+  @RequiresModule('multi-store')
+  @RequiresPermission('user.manage')
+  @Put(':id/stores')
+  stores(@Req() req: RequestWithContext, @Param('id', new ParseUUIDPipe()) id: string, @Body(new ZodPipe(UserStoresSchema)) body: z.infer<typeof UserStoresSchema>) {
+    return this.users.setStores(req.tenant!, auditContext(req), id, body.storeIds);
   }
 
   @RequiresPermission('user.manage')

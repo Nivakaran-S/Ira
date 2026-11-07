@@ -2,6 +2,7 @@ import { DatePipe } from '@angular/common';
 import { ChangeDetectionStrategy, Component, computed, inject, input, signal } from '@angular/core';
 import { Router, RouterLink } from '@angular/router';
 import { apiResource, humanMessage, toApiError, ToastService, UiBadge, UiCopy, UiDialog, UiEmpty, UiField } from 'ui';
+import { TenantBillingPanel } from './tenant-billing';
 import { ConsoleApi, type DomainView, type TenantDetail as Tenant, type TenantModules } from './console-api';
 import { moduleRows } from './modules-view';
 import { tenantUrl } from './tenant-new';
@@ -9,7 +10,7 @@ import { tenantUrl } from './tenant-new';
 @Component({
   selector: 'admin-tenant-detail',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [RouterLink, UiBadge, UiCopy, UiDialog, UiEmpty, UiField, DatePipe],
+  imports: [RouterLink, UiBadge, UiCopy, UiDialog, UiEmpty, UiField, DatePipe, TenantBillingPanel],
   template: `
     <div class="page stack">
       <a routerLink="/tenants" class="small">← Tenants</a>
@@ -46,6 +47,8 @@ import { tenantUrl } from './tenant-new';
           </div>
           <div class="small muted">Limits: {{ t.plan.maxStores }} stores · {{ t.plan.maxDevices }} devices · {{ t.plan.maxUsers }} users</div>
         </section>
+
+        <admin-tenant-billing [tenantId]="t.id" />
 
         <section class="card flush">
           <div class="pad"><h2>Modules</h2><p class="small muted">Overrides apply on top of the business type. Modules whose dependencies are off are dropped automatically.</p></div>

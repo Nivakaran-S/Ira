@@ -1,4 +1,6 @@
 import { Module } from '@nestjs/common';
+import { PlatformBillingController, TenantBillingController } from './billing.controller.js';
+import { BillingService } from './billing.service.js';
 import { BusinessTypesController } from './business-types.controller.js';
 import { BusinessTypesService } from './business-types.service.js';
 import { CaddyController } from './caddy.controller.js';
@@ -24,6 +26,8 @@ import { TenantsService } from './tenants.service.js';
     DomainsController,
     CaddyController,
     ImpersonationController,
+    PlatformBillingController,
+    TenantBillingController,
   ],
   providers: [
     PlatformAuthService,
@@ -34,6 +38,7 @@ import { TenantsService } from './tenants.service.js';
     DomainsService,
     DomainRecheckJob,
     ImpersonationService,
+    BillingService,
     { provide: DNS_RESOLVER, useValue: systemDnsResolver },
   ],
 })
