@@ -17,3 +17,4 @@ export * from './receipt-builder.js';
 export * from './approvals.js';
 export * from './promotions.js';
 export * from './schemas/retail.js';
+export * from './schemas/restaurant.js';

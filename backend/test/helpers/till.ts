@@ -18,7 +18,7 @@ export class TestTill {
   ) {}
 
   /** Awaitable response with a supertest-like .expect(status) that reports the body on mismatch. */
-  call(method: 'GET' | 'POST' | 'PUT' | 'PATCH', path: string, body?: unknown, headers: Record<string, string> = {}): Pending {
+  call(method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE', path: string, body?: unknown, headers: Record<string, string> = {}): Pending {
     const p = this.send(method, path, body, headers);
     return Object.assign(p, {
       expect: async (status: number) => {

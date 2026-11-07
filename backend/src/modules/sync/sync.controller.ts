@@ -25,7 +25,7 @@ export class SyncController {
   @Post('up')
   @HttpCode(200)
   up(@Req() req: RequestWithContext, @Body(new ZodPipe(SyncUpSchema)) body: z.infer<typeof SyncUpSchema>) {
-    return this.sync.up(req.tenant!, req.device!, body.ops, auditContext(req));
+    return this.sync.up(req.tenant!, req.device!, body.ops, auditContext(req), (req.body as { ops: unknown[] }).ops);
   }
 }
 

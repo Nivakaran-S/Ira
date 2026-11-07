@@ -363,30 +363,31 @@ model Category {
 }
 
 model Product {
-  id           String          @id @default(uuid(7)) @db.Uuid
-  tenantId     String          @db.Uuid
-  name         String
-  version      BigInt          @default(dbgenerated("nextval('sync_version')"))
-  sku          String?
-  categoryId   String?         @db.Uuid
-  taxGroupId   String?         @db.Uuid
-  price        Int
-  active       Boolean         @default(true)
-  trackStock   Boolean         @default(true)
-  customFields Json            @default("{}")
+  id             String                 @id @default(uuid(7)) @db.Uuid
+  tenantId       String                 @db.Uuid
+  name           String
+  version        BigInt                 @default(dbgenerated("nextval('sync_version')"))
+  sku            String?
+  categoryId     String?                @db.Uuid
+  taxGroupId     String?                @db.Uuid
+  price          Int
+  active         Boolean                @default(true)
+  trackStock     Boolean                @default(true)
+  customFields   Json                   @default("{}")
   /// Variants module: a family (hasVariants) is not sold itself; its variants are products with parentId.
-  hasVariants  Boolean         @default(false)
-  parentId     String?         @db.Uuid
-  variantLabel String?
-  createdAt    DateTime        @default(now())
-  updatedAt    DateTime        @updatedAt
-  category     Category?       @relation(fields: [tenantId, categoryId], references: [tenantId, id])
-  taxGroup     TaxGroup?       @relation(fields: [tenantId, taxGroupId], references: [tenantId, id])
-  stock        StockLevel[]
-  movements    StockMovement[]
-  parent       Product?        @relation("Variants", fields: [tenantId, parentId], references: [tenantId, id])
-  variants     Product[]       @relation("Variants")
-  barcodes     Barcode[]
+  hasVariants    Boolean                @default(false)
+  parentId       String?                @db.Uuid
+  variantLabel   String?
+  createdAt      DateTime               @default(now())
+  updatedAt      DateTime               @updatedAt
+  category       Category?              @relation(fields: [tenantId, categoryId], references: [tenantId, id])
+  taxGroup       TaxGroup?              @relation(fields: [tenantId, taxGroupId], references: [tenantId, id])
+  stock          StockLevel[]
+  movements      StockMovement[]
+  parent         Product?               @relation("Variants", fields: [tenantId, parentId], references: [tenantId, id])
+  variants       Product[]              @relation("Variants")
+  barcodes       Barcode[]
+  modifierGroups ProductModifierGroup[]
 
   @@unique([tenantId, id])
   @@unique([tenantId, sku])
@@ -528,6 +529,10 @@ model Sale {
   loyaltyEarned    Int        @default(0)
   /// Promotions applied: [{promotionId, label, amount}] across lines and cart.
   promotions       Json       @default("[]")
+  /// Gratuity on top of `due`; payments add up to due + tip. Not revenue.
+  tip              Int        @default(0)
+  /// Tables module: the order (tab) this sale paid for, in full or in part.
+  orderId          String?    @db.Uuid
   soldAt           DateTime
   createdAt        DateTime   @default(now())
   /// Rung up offline and synced later; catalogVersion is the down-sync cursor the till priced it with.
@@ -566,6 +571,9 @@ model SaleLine {
   taxes            Json
   total            Int
   note             String?
+  /// Modifiers chosen: [{id, name, priceDelta}]; unitPrice and listPrice include them.
+  modifiers        Json         @default("[]")
+  orderLineId      String?      @db.Uuid
   refundedQtyMilli Int          @default(0)
   sale             Sale         @relation(fields: [tenantId, saleId], references: [tenantId, id], onDelete: Cascade)
   refundLines      RefundLine[]
@@ -773,4 +781,121 @@ model Promotion {
   updatedAt    DateTime      @updatedAt
 
   @@unique([tenantId, id])
+}
+
+// ---------------- Restaurant ----------------
+
+model ModifierGroup {
+  id        String                 @id @default(uuid(7)) @db.Uuid
+  tenantId  String                 @db.Uuid
+  name      String
+  minSelect Int                    @default(0)
+  maxSelect Int                    @default(1)
+  version   BigInt                 @default(dbgenerated("nextval('sync_version')"))
+  createdAt DateTime               @default(now())
+  updatedAt DateTime               @updatedAt
+  options   Modifier[]
+  products  ProductModifierGroup[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, name])
+}
+
+model Modifier {
+  id         String        @id @default(uuid(7)) @db.Uuid
+  tenantId   String        @db.Uuid
+  groupId    String        @db.Uuid
+  name       String
+  priceDelta Int           @default(0)
+  active     Boolean       @default(true)
+  position   Int           @default(0)
+  group      ModifierGroup @relation(fields: [tenantId, groupId], references: [tenantId, id], onDelete: Cascade)
+
+  @@unique([tenantId, id])
+}
+
+model ProductModifierGroup {
+  tenantId  String        @db.Uuid
+  productId String        @db.Uuid
+  groupId   String        @db.Uuid
+  position  Int           @default(0)
+  product   Product       @relation(fields: [tenantId, productId], references: [tenantId, id], onDelete: Cascade)
+  group     ModifierGroup @relation(fields: [tenantId, groupId], references: [tenantId, id], onDelete: Cascade)
+
+  @@id([productId, groupId])
+}
+
+model DiningTable {
+  id        String   @id @default(uuid(7)) @db.Uuid
+  tenantId  String   @db.Uuid
+  storeId   String   @db.Uuid
+  name      String
+  area      String?
+  seats     Int      @default(2)
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+  orders    Order[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, storeId, name])
+}
+
+enum OrderStatus {
+  OPEN
+  CLOSED
+  CANCELLED
+}
+
+enum OrderLineStatus {
+  NEW
+  SENT
+  PREPARING
+  READY
+  SERVED
+  VOID
+}
+
+/// A tab: a table's (or counter customer's) running order, shared by every till in the store.
+model Order {
+  id         String       @id @db.Uuid
+  tenantId   String       @db.Uuid
+  storeId    String       @db.Uuid
+  tableId    String?      @db.Uuid
+  name       String?
+  guests     Int?
+  status     OrderStatus  @default(OPEN)
+  openedById String       @db.Uuid
+  createdAt  DateTime     @default(now())
+  updatedAt  DateTime     @updatedAt
+  closedAt   DateTime?
+  table      DiningTable? @relation(fields: [tenantId, tableId], references: [tenantId, id])
+  lines      OrderLine[]
+
+  @@unique([tenantId, id])
+  @@index([tenantId, storeId, status])
+}
+
+model OrderLine {
+  id           String          @id @db.Uuid
+  tenantId     String          @db.Uuid
+  orderId      String          @db.Uuid
+  productId    String          @db.Uuid
+  name         String
+  qtyMilli     Int
+  paidQtyMilli Int             @default(0)
+  /// Base price plus modifiers, as added. Paying re-prices from the catalog.
+  unitPrice    Int
+  modifiers    Json            @default("[]")
+  note         String?
+  course       Int             @default(1)
+  status       OrderLineStatus @default(NEW)
+  sentAt       DateTime?
+  readyAt      DateTime?
+  createdById  String          @db.Uuid
+  createdAt    DateTime        @default(now())
+  updatedAt    DateTime        @updatedAt
+  order        Order           @relation(fields: [tenantId, orderId], references: [tenantId, id], onDelete: Cascade)
+
+  @@unique([tenantId, id])
+  @@index([tenantId, status, sentAt])
 }

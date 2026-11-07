@@ -32,6 +32,8 @@ export const SaleLineInputSchema = z.object({
   unitPrice: minorAmount.optional(),
   discount: DiscountSchema.optional(),
   note: z.string().trim().max(200).optional(),
+  /** Modifiers module: options chosen for this item; their price deltas add to the unit price. */
+  modifierIds: z.array(z.uuid()).max(20).optional(),
 });
 
 export const CreateSaleSchema = z.object({
@@ -42,6 +44,8 @@ export const CreateSaleSchema = z.object({
   lines: z.array(SaleLineInputSchema).min(1).max(500),
   cartDiscount: DiscountSchema.optional(),
   payments: z.array(PaymentInputSchema).min(1).max(10),
+  /** Gratuity on top of the amount due; payments cover due + tip. Not revenue, not taxed. */
+  tip: minorAmount.default(0),
   /** What the till showed. Any difference from the server's calculation rejects the sale. */
   expectedTotal: minorAmount,
 });

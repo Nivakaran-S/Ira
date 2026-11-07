@@ -19,10 +19,12 @@ import { ReportingModule } from './modules/reporting/reporting.module.js';
 import { SyncModule } from './modules/sync/sync.module.js';
 import { CustomersModule } from './modules/customers/customers.module.js';
 import { PromotionsModule } from './modules/promotions/promotions.module.js';
+import { ModifiersModule } from './modules/restaurant/modifiers.module.js';
+import { RestaurantModule } from './modules/restaurant/restaurant.module.js';
 
 @Module({
   imports: [ScheduleModule.forRoot(), ConfigModule, InfraModule, SecurityModule, AuditModule, AccessModule, IdentityModule, BackofficeModule, PlatformModule,
-    SettingsModule, CatalogModule, InventoryModule, SalesModule, ReportingModule, SyncModule, CustomersModule, PromotionsModule],
+    SettingsModule, CatalogModule, InventoryModule, SalesModule, ReportingModule, SyncModule, CustomersModule, PromotionsModule, ModifiersModule, RestaurantModule],
   controllers: [HealthController],
   providers: [{ provide: APP_FILTER, useClass: AppErrorFilter }],
 })

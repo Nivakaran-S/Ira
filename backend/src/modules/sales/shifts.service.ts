@@ -15,7 +15,7 @@ export interface ShiftReport {
     id: string; registerId: string; storeId: string; status: string; openedAt: Date; closedAt: Date | null;
     openedById: string; closedById: string | null; openingFloat: number; countedCash: number | null; variance: number | null; note: string | null;
   };
-  sales: { count: number; subtotal: number; discountTotal: number; taxTotal: number; total: number; rounding: number };
+  sales: { count: number; subtotal: number; discountTotal: number; taxTotal: number; total: number; rounding: number; tips: number };
   voids: { count: number; total: number };
   refunds: { count: number; total: number };
   payments: { method: string; amount: number }[];
@@ -49,7 +49,7 @@ export class ShiftsService {
       tx.sale.aggregate({
         where: { shiftId, status: 'COMPLETED' },
         _count: true,
-        _sum: { subtotal: true, discountTotal: true, taxTotal: true, total: true, rounding: true },
+        _sum: { subtotal: true, discountTotal: true, taxTotal: true, total: true, rounding: true, tip: true },
       }),
       tx.sale.aggregate({ where: { shiftId, status: 'VOIDED' }, _count: true, _sum: { due: true } }),
       tx.payment.groupBy({ by: ['method'], where: { sale: { shiftId, status: 'COMPLETED' } }, _sum: { amount: true } }),
@@ -75,6 +75,7 @@ export class ShiftsService {
         taxTotal: completed._sum.taxTotal ?? 0,
         total: completed._sum.total ?? 0,
         rounding: completed._sum.rounding ?? 0,
+        tips: completed._sum.tip ?? 0,
       },
       voids: { count: voided._count, total: voided._sum.due ?? 0 },
       refunds: { count: refunds.reduce((s, r) => s + r._count, 0), total: refunds.reduce((s, r) => s + refundOut(r), 0) },

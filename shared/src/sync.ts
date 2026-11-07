@@ -48,6 +48,8 @@ export const OfflineSaleSchema = z.object({
         note: z.string().max(200).optional(),
         /** The item promotion the till applied, if any. */
         promo: AppliedPromoSchema.optional(),
+        /** Modifiers chosen; unitPrice and listPrice already include their deltas. */
+        modifiers: z.array(z.object({ id: z.uuid(), name: z.string().max(60), priceDelta: z.int().min(0) })).max(20).optional(),
       }),
     )
     .min(1)
@@ -57,6 +59,7 @@ export const OfflineSaleSchema = z.object({
   cartPromo: z.object({ promotionId: z.uuid(), label: z.string().max(80), discount: DiscountSchema }).optional(),
   payments: z.array(PaymentInputSchema.extend({ method: z.enum(OFFLINE_PAYMENT_METHODS) })).min(1).max(10),
   expectedTotal: z.int().min(0),
+  tip: z.int().min(0).default(0),
   approvals: z.array(ApprovalSchema).max(5).default([]),
 });
 

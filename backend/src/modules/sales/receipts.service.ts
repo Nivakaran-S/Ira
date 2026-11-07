@@ -47,7 +47,12 @@ export class ReceiptsService {
       status: sale.status,
       copy,
       pricesIncludeTax: sale.pricesIncludeTax,
-      lines: sale.lines,
+      lines: sale.lines.map((l) => {
+        const mods = (l.modifiers as { name: string; priceDelta: number }[]) ?? [];
+        const modText = mods.map((m) => m.name).join(', ');
+        return { ...l, note: [modText, l.note].filter(Boolean).join(' / ') || null };
+      }),
+      tip: sale.tip,
       subtotal: sale.subtotal,
       discountTotal: sale.discountTotal,
       taxTotal: sale.taxTotal,

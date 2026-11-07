@@ -32,6 +32,8 @@ export interface SaleReceiptInput {
   customerName?: string | null;
   pointsEarned?: number;
   pointsBalance?: number | null;
+  /** Gratuity, paid on top of the total. */
+  tip?: number;
 }
 
 const METHOD_LABEL: Record<string, string> = { CASH: 'Cash', CARD: 'Card', OTHER: 'Other', LOYALTY: 'Points', STORE_CREDIT: 'Store credit' };
@@ -53,6 +55,10 @@ export function buildSaleReceipt(s: SaleReceiptInput): ReceiptDoc {
   if (!s.pricesIncludeTax && s.taxTotal) totals.push({ label: 'Tax', value: m(s.taxTotal) });
   if (s.rounding) totals.push({ label: 'Rounding', value: m(s.rounding) });
   totals.push({ label: `TOTAL ${s.currency}`, value: m(s.due), bold: true });
+  if (s.tip) {
+    totals.push({ label: 'Tip', value: m(s.tip) });
+    totals.push({ label: 'Paid', value: m(s.due + s.tip), bold: true });
+  }
   return {
     currency: s.currency,
     header: [s.tenantName, ...(s.storeName ? [s.storeName] : []), ...textLines(s.header)],

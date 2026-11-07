@@ -7,7 +7,7 @@ import { SettingsService } from '../settings/settings.service.js';
 export interface SalesSummary {
   currency: string;
   range: { from: string; to: string; timezone: string };
-  sales: { count: number; subtotal: number; discountTotal: number; taxTotal: number; total: number };
+  sales: { count: number; subtotal: number; discountTotal: number; taxTotal: number; total: number; tips: number };
   voids: { count: number; total: number };
   refunds: { count: number; total: number };
   net: number;
@@ -32,7 +32,7 @@ export class ReportsService {
     return this.tenantDb.run(tenant.id, async (tx) => {
       const storeSql = storeId ? Prisma.sql`AND "storeId" = ${storeId}::uuid` : Prisma.empty;
       const [completed, voided, refunds, payments, byDay, top, taxRows] = await Promise.all([
-        tx.sale.aggregate({ where: done, _count: true, _sum: { subtotal: true, discountTotal: true, taxTotal: true, due: true } }),
+        tx.sale.aggregate({ where: done, _count: true, _sum: { subtotal: true, discountTotal: true, taxTotal: true, due: true, tip: true } }),
         tx.sale.aggregate({ where: { ...saleWhere, status: 'VOIDED' }, _count: true, _sum: { due: true } }),
         tx.refund.aggregate({ where: { createdAt: { gte: from, lt: to }, ...(storeId ? { storeId } : {}) }, _count: true, _sum: { total: true, rounding: true } }),
         tx.payment.groupBy({ by: ['method'], where: { sale: done }, _sum: { amount: true } }),
@@ -70,6 +70,7 @@ export class ReportsService {
           discountTotal: completed._sum.discountTotal ?? 0,
           taxTotal: completed._sum.taxTotal ?? 0,
           total: salesTotal,
+          tips: completed._sum.tip ?? 0,
         },
         voids: { count: voided._count, total: voided._sum.due ?? 0 },
         refunds: { count: refunds._count, total: refundTotal },

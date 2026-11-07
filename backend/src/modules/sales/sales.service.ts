@@ -1,8 +1,9 @@
 import { Injectable } from '@nestjs/common';
 import {
-  approvalNeeds, cashRound, type CreateRefundSchema, type CreateSaleSchema, type Discount, type ModuleKey, type PaymentMethodKey, type Permission,
-  pointsEarned, priceWithPromotions, type PricingResult, prorate, type TenantSettings,
+  approvalNeeds, cashRound, chooseModifiers, type CreateRefundSchema, type CreateSaleSchema, type Discount, type ModuleKey, type PaymentMethodKey, type Permission,
+  pointsEarned, priceWithPromotions, type PricingResult, prorate, type TenantSettings, withModifiers,
 } from '@pos/shared';
+import { ModifiersService } from '../restaurant/modifiers.service.js';
 import type { z } from 'zod';
 import { AppError } from '../../common/errors/app-error.js';
 import type { RequestWithContext, TenantContext } from '../../common/request-context.js';
@@ -102,7 +103,13 @@ export interface SaleRecord {
   promotions?: AppliedPromotion[];
   /** Set when the loyalty module is on: how points are earned and what they are worth. */
   loyalty?: TenantSettings['loyalty'] | null;
-  lines: { productId: string; name: string; sku: string | null; unitPrice: number; listPrice: number; qtyMilli: number; note?: string; trackStock: boolean }[];
+  tip?: number;
+  /** Paying (part of) an open order: which order lines and how much of each. */
+  orderPay?: { orderId: string; lines: { orderLineId: string; qtyMilli: number }[] } | null;
+  lines: {
+    productId: string; name: string; sku: string | null; unitPrice: number; listPrice: number; qtyMilli: number; note?: string; trackStock: boolean;
+    modifiers?: { id: string; name: string; priceDelta: number }[]; orderLineId?: string | null;
+  }[];
 }
 
 export interface AppliedPromotion {
@@ -157,6 +164,7 @@ export class SalesService {
     private readonly audit: AuditService,
     private readonly ledgers: LedgersService,
     private readonly promotions: PromotionsService,
+    private readonly modifiers: ModifiersService,
   ) {}
 
   /** The cashier's own permission is enough unless the action crosses a threshold; otherwise a manager approves. */
@@ -175,12 +183,12 @@ export class SalesService {
     return tx.sale.findUnique({ where: { id }, include: saleInclude });
   }
 
-  async create(req: RequestWithContext, input: SaleInput): Promise<SaleWithLines> {
+  async create(req: RequestWithContext, input: SaleInput, orderPay?: SaleRecord['orderPay']): Promise<SaleWithLines> {
     const tenant = req.tenant!;
     const device = req.device!;
     const cashierId = req.principal!.userId;
     try {
-      return await this.createOnce(req, tenant, device, cashierId, input);
+      return await this.createOnce(req, tenant, device, cashierId, input, orderPay ?? null);
     } catch (e) {
       // Two submissions of the same sale raced: the loser returns the winner's row.
       if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
@@ -197,6 +205,7 @@ export class SalesService {
     device: { id: string; registerId: string },
     cashierId: string,
     input: SaleInput,
+    orderPay: SaleRecord['orderPay'],
   ): Promise<SaleWithLines> {
     const existing = await this.tenantDb.run(tenant.id, (tx) => this.getSale(tx, input.id));
     if (existing) return existing;
@@ -206,10 +215,15 @@ export class SalesService {
     ]);
     if (input.customerId && !modules.includes('customers')) throw new AppError('MODULE_DISABLED', 403, 'Module customers is not enabled', { module: 'customers' });
     checkTenderRules(input.payments, input.customerId, modules, settings);
-    const { products, promos, customerOk } = await this.tenantDb.run(tenant.id, async (tx) => ({
-      products: await tx.product.findMany({ where: { id: { in: [...new Set(input.lines.map((l) => l.productId))] }, active: true }, include: productInclude }),
+    if (input.tip && !modules.includes('tables')) throw new AppError('MODULE_DISABLED', 403, 'Tips need the tables module', { module: 'tables' });
+    const wantsModifiers = input.lines.some((l) => l.modifierIds?.length);
+    if (wantsModifiers && !modules.includes('modifiers')) throw new AppError('MODULE_DISABLED', 403, 'Module modifiers is not enabled', { module: 'modifiers' });
+    const productIds = [...new Set(input.lines.map((l) => l.productId))];
+    const { products, promos, customerOk, groups } = await this.tenantDb.run(tenant.id, async (tx) => ({
+      products: await tx.product.findMany({ where: { id: { in: productIds }, active: true }, include: productInclude }),
       promos: modules.includes('promotions') ? await this.promotions.live(tx) : [],
       customerOk: input.customerId ? !!(await tx.customer.findUnique({ where: { id: input.customerId } })) : true,
+      groups: modules.includes('modifiers') ? await this.modifiers.forProducts(tx, productIds) : new Map(),
     }));
     if (!customerOk) throw AppError.notFound('Customer not found');
     const byId = new Map(products.map((p) => [p.id, p]));
@@ -218,11 +232,20 @@ export class SalesService {
     const family = products.find((p) => p.hasVariants);
     if (family) throw new AppError('INVALID_STATE', 409, `Choose a variant of ${family.name}`, { productId: family.id });
 
+    // Modifiers: the choice must satisfy the product's groups; their deltas make the list price.
+    const chosen = input.lines.map((l) => {
+      const p = byId.get(l.productId)!;
+      const r = chooseModifiers(groups.get(p.id) ?? [], l.modifierIds ?? []);
+      if (!r.ok) throw new AppError('INVALID_STATE', 409, `${p.name}: ${r.reason}`, { productId: p.id });
+      return r.chosen.map((c) => ({ id: c.id, name: c.name, priceDelta: c.priceDelta }));
+    });
+    const listPrice = (i: number) => withModifiers(byId.get(input.lines[i].productId)!.price, chosen[i]);
+
     const { priced } = priceWithPromotions({
       pricesIncludeTax: settings.pricesIncludeTax,
       lines: input.lines.map((l, i) => {
         const p = byId.get(l.productId)!;
-        return { key: String(i), productId: p.id, categoryId: p.categoryId, unitPrice: l.unitPrice ?? p.price, qtyMilli: l.qtyMilli, taxes: taxStack(p.taxGroup), discount: l.discount };
+        return { key: String(i), productId: p.id, categoryId: p.categoryId, unitPrice: l.unitPrice ?? listPrice(i), qtyMilli: l.qtyMilli, taxes: taxStack(p.taxGroup), discount: l.discount };
       }),
       cartDiscount: input.cartDiscount,
       promotions: promos,
@@ -230,7 +253,7 @@ export class SalesService {
     });
 
     const approvals: Approval[] = [];
-    const saleLines = input.lines.map((l) => ({ ...l, listPrice: byId.get(l.productId)!.price, unitPrice: l.unitPrice ?? byId.get(l.productId)!.price }));
+    const saleLines = input.lines.map((l, i) => ({ ...l, listPrice: listPrice(i), unitPrice: l.unitPrice ?? listPrice(i) }));
     for (const n of approvalNeeds(perms, settings, saleLines, input.cartDiscount, priced)) await this.authorize(req, perms, n.action, n.force, approvals);
 
     const allCash = input.payments.every((p) => p.method === 'CASH');
@@ -238,7 +261,7 @@ export class SalesService {
     if (input.expectedTotal !== due) {
       throw new AppError('TOTAL_MISMATCH', 409, 'The till and the server disagree on the total', { expected: input.expectedTotal, actual: due });
     }
-    const payments = settlePayments(input.payments, due);
+    const payments = settlePayments(input.payments, due + (input.tip ?? 0));
 
     return this.tenantDb.run(tenant.id, async (tx) => {
       const shift = await this.shifts.requireOpenShift(tx, device.registerId);
@@ -249,9 +272,14 @@ export class SalesService {
         offline: false, catalogVersion: null, customerId: input.customerId ?? null,
         promotions: appliedPromotions(priced, new Map(promos.map((p) => [p.name, p.id]))),
         loyalty: modules.includes('loyalty') ? settings.loyalty : null,
-        lines: input.lines.map((l) => {
+        tip: input.tip ?? 0,
+        orderPay,
+        lines: input.lines.map((l, i) => {
           const p = byId.get(l.productId)!;
-          return { productId: p.id, name: p.name, sku: p.sku, unitPrice: l.unitPrice ?? p.price, listPrice: p.price, qtyMilli: l.qtyMilli, note: l.note, trackStock: p.trackStock };
+          return {
+            productId: p.id, name: p.name, sku: p.sku, unitPrice: l.unitPrice ?? listPrice(i), listPrice: listPrice(i), qtyMilli: l.qtyMilli, note: l.note,
+            trackStock: p.trackStock, modifiers: chosen[i], orderLineId: orderPay?.lines[i]?.orderLineId ?? null,
+          };
         }),
       }, auditContext(req));
       return (await this.getSale(tx, input.id))!;
@@ -291,14 +319,14 @@ export class SalesService {
         rounding: r.due - r.priced.totals.total, due: r.due, change: r.payments.reduce((s, p) => s + p.change, 0),
         taxes: json(r.priced.taxes), cartDiscount: r.cartDiscount ? json(r.cartDiscount) : Prisma.DbNull, approvals: json(r.approvals),
         soldAt: r.soldAt, offline: r.offline, catalogVersion: r.catalogVersion,
-        customerId: r.customerId ?? null, loyaltyEarned, promotions: json(r.promotions ?? []),
+        customerId: r.customerId ?? null, loyaltyEarned, promotions: json(r.promotions ?? []), tip: r.tip ?? 0, orderId: r.orderPay?.orderId ?? null,
         lines: {
           create: r.priced.lines.map((l, i) => {
             const src = r.lines[i];
             return {
               position: i, productId: src.productId, name: src.name, sku: src.sku, unitPrice: src.unitPrice, listPrice: src.listPrice,
               qtyMilli: src.qtyMilli, gross: l.gross, discount: l.discount, discounts: json(l.discounts), net: l.net, tax: l.tax,
-              taxes: json(l.taxes), total: l.total, note: src.note ?? null,
+              taxes: json(l.taxes), total: l.total, note: src.note ?? null, modifiers: json(src.modifiers ?? []), orderLineId: src.orderLineId ?? null,
             };
           }),
         },
@@ -313,10 +341,30 @@ export class SalesService {
         storeId: r.storeId, productId: l.productId, deltaMilli: -l.qtyMilli, reason: 'SALE' as const, refType: 'Sale', refId: r.id, userId: r.cashierId,
       })),
     );
+    if (r.orderPay) await this.markOrderPaid(tx, r.orderPay);
     await this.audit.record(tx, tenantId, {
       ...ctx, action: 'sale.completed', entityType: 'Sale', entityId: r.id,
       after: { receiptNo: r.receiptNo, total: r.priced.totals.total, due: r.due, lines: r.lines.length, approvals: r.approvals, ...(r.offline ? { offline: true } : {}) },
     });
+  }
+
+  /**
+   * Records what of an order this sale paid for, with an optimistic lock per line, and closes the
+   * order once every line that was not voided is paid in full.
+   */
+  private async markOrderPaid(tx: Tx, pay: NonNullable<SaleRecord['orderPay']>) {
+    for (const sel of pay.lines) {
+      const line = await tx.orderLine.findUnique({ where: { id: sel.orderLineId } });
+      if (!line || line.orderId !== pay.orderId || line.status === 'VOID') throw AppError.notFound('Order line not found');
+      if (line.paidQtyMilli + sel.qtyMilli > line.qtyMilli) throw new AppError('INVALID_STATE', 409, 'That is more than is left to pay on the line', { orderLineId: line.id });
+      const n = await tx.orderLine.updateMany({ where: { id: line.id, paidQtyMilli: line.paidQtyMilli }, data: { paidQtyMilli: { increment: sel.qtyMilli } } });
+      if (n.count !== 1) throw AppError.conflict('The order changed meanwhile; reload it');
+    }
+    const open = await tx.orderLine.count({ where: { orderId: pay.orderId, status: { not: 'VOID' } } });
+    const lines = await tx.orderLine.findMany({ where: { orderId: pay.orderId, status: { not: 'VOID' } }, select: { qtyMilli: true, paidQtyMilli: true } });
+    if (open > 0 && lines.every((l) => l.paidQtyMilli >= l.qtyMilli)) {
+      await tx.order.update({ where: { id: pay.orderId }, data: { status: 'CLOSED', closedAt: new Date() } });
+    }
   }
 
   /** Voids are only allowed while the sale's shift is still open on this register. */

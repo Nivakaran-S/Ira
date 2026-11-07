@@ -20,6 +20,8 @@ export const PERMISSIONS = [
   'sync.review',
   'customer.manage',
   'promotion.manage',
+  'kitchen.view',
+  'table.manage',
 ] as const;
 
 export type Permission = (typeof PERMISSIONS)[number];
