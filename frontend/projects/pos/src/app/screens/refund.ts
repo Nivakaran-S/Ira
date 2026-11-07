@@ -13,6 +13,9 @@ import { TillState } from '../till-state';
   template: `
     <div class="page stack">
       <h1>Refund</h1>
+      @if (state.offline()) {
+        <p class="error-text" data-testid="refund-offline">Refunds need a connection to the server.</p>
+      }
       @if (!state.shiftOpen()) {
         <p class="muted">Open a shift first: refunds are paid from this till's drawer.</p>
       }
@@ -64,7 +67,7 @@ import { TillState } from '../till-state';
             </div>
             <div class="row-between">
               <strong>Refund {{ state.money(total()) }}</strong>
-              <button type="button" class="btn primary" data-testid="do-refund" [disabled]="!valid() || busy() || !state.shiftOpen()" (click)="submit(s)">Refund</button>
+              <button type="button" class="btn primary" data-testid="do-refund" [disabled]="!valid() || busy() || !state.shiftOpen() || state.offline()" (click)="submit(s)">Refund</button>
             </div>
           }
         </section>

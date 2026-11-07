@@ -7,6 +7,8 @@ export interface DeviceRecord {
   /** Non-extractable; IndexedDB stores CryptoKey objects by structured clone without exposing key bytes. */
   privateKey: CryptoKey;
   publicKey: CryptoKey;
+  /** Non-extractable AES-GCM key sealing the offline store. Added in Milestone 3; older records get one on load. */
+  dataKey?: CryptoKey;
 }
 
 /** Where this till keeps its identity. */

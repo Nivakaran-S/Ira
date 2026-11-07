@@ -2,7 +2,9 @@ import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@a
 import { type Discount, type ReceiptDoc, uuidv7 } from '@pos/shared';
 import { humanMessage, toApiError, ToastService, UiDialog } from 'ui';
 import { ApprovalCancelled, Approvals } from '../api/approvals';
-import { type CatalogProduct, PosApi, type Sale } from '../api/pos-api';
+import { type CatalogProduct, PosApi } from '../api/pos-api';
+import { OfflineRefused, OfflineTill } from '../offline/offline-till';
+import { isOfflineError } from '../offline/sync-engine';
 import { HardwareBridge } from '../hardware/bridge';
 import { Cart, type CartLine } from '../sell/cart';
 import { TillState } from '../till-state';
@@ -120,10 +122,13 @@ import { ReceiptView } from './receipt-view';
     <ui-dialog title="Sale complete" [open]="!!done()" (closed)="done.set(null)">
       @if (done(); as d) {
         <div class="stack" data-testid="sale-complete">
-          @if (d.sale.change) {
-            <div class="change">Change <strong data-testid="change">{{ state.money(d.sale.change) }}</strong></div>
+          @if (d.change) {
+            <div class="change">Change <strong data-testid="change">{{ state.money(d.change) }}</strong></div>
           }
-          <div class="muted">Receipt {{ d.sale.receiptNo }}</div>
+          <div class="muted" data-testid="receipt-no-done">Receipt {{ d.receiptNo }}</div>
+          @if (d.offline) {
+            <div class="small offline-note" data-testid="sold-offline">Sold offline. It will reach the server when the till reconnects.</div>
+          }
           @if (d.receipt) {
             <pos-receipt-view [receipt]="d.receipt" />
           }
@@ -167,6 +172,7 @@ import { ReceiptView } from './receipt-view';
     label { display: flex; flex-direction: column; gap: 4px; font-weight: 550; }
     .change { font-size: 26px; text-align: center; background: var(--ok-soft); color: var(--ok); border-radius: var(--radius-lg); padding: var(--s4); }
     .btn.danger { color: var(--danger); }
+    .offline-note { background: var(--warn-soft); color: var(--warn); padding: var(--s2) var(--s3); border-radius: var(--radius); }
     @media (max-width: 820px) { .sell { grid-template-columns: 1fr; } .cart { border-left: none; border-top: 1px solid var(--border); } }
   `,
 })
@@ -177,6 +183,7 @@ export class Sell {
   private readonly approvals = inject(Approvals);
   private readonly bridge = inject(HardwareBridge);
   private readonly toasts = inject(ToastService);
+  private readonly offlineTill = inject(OfflineTill);
 
   protected readonly query = signal('');
   protected readonly category = signal<string | null>(null);
@@ -184,7 +191,7 @@ export class Sell {
   protected readonly cartDiscountOpen = signal(false);
   protected readonly paying = signal(false);
   protected readonly busy = signal(false);
-  protected readonly done = signal<{ sale: Sale; receipt: ReceiptDoc | null } | null>(null);
+  protected readonly done = signal<{ receiptNo: string; change: number; receipt: ReceiptDoc | null; offline: boolean } | null>(null);
 
   protected readonly visible = computed(() => {
     const q = this.query().trim().toLowerCase();
@@ -261,9 +268,32 @@ export class Sell {
   protected async complete(payments: PaymentDraft[]) {
     if (this.busy()) return;
     this.busy.set(true);
+    // One id for this sale whichever way it goes: if an online attempt did reach the server, the
+    // offline copy syncs as a duplicate instead of a second sale.
+    const id = uuidv7();
+    try {
+      if (this.state.offline()) await this.completeOffline(payments, id);
+      else {
+        try {
+          await this.completeOnline(payments, id);
+        } catch (e) {
+          if (!isOfflineError(e)) throw e;
+          this.state.sync.online.set(false);
+          await this.completeOffline(payments, id);
+        }
+      }
+    } catch (e) {
+      if (e instanceof OfflineRefused) this.toasts.error(e.message);
+      else if (!(e instanceof ApprovalCancelled)) this.toasts.error(humanMessage(toApiError(e)));
+    } finally {
+      this.busy.set(false);
+    }
+  }
+
+  private async completeOnline(payments: PaymentDraft[], id: string) {
     const allCash = payments.every((p) => p.method === 'CASH');
     const body = {
-      id: uuidv7(),
+      id,
       lines: this.cart.lines().map((l) => ({
         productId: l.product.id,
         qtyMilli: l.qtyMilli,
@@ -275,20 +305,22 @@ export class Sell {
       payments: payments.map((p) => ({ method: p.method, amount: p.amount, ...(p.tendered ? { tendered: p.tendered } : {}), ...(p.reference ? { reference: p.reference } : {}) })),
       expectedTotal: allCash ? this.cart.cashDue() : this.cart.total(),
     };
-    try {
-      // Same id on every retry: a sale is created at most once even if approvals interrupt it.
-      const sale = await this.approvals.run((h) => this.api.sell(body, h));
-      this.cart.clear();
-      this.paying.set(false);
-      const receipt = await this.api.receipt(sale.id).catch(() => null);
-      this.done.set({ sale, receipt });
-      if (receipt) await this.print(receipt, payments.some((p) => p.method === 'CASH'));
-      void this.state.refreshShift();
-    } catch (e) {
-      if (!(e instanceof ApprovalCancelled)) this.toasts.error(humanMessage(toApiError(e)));
-    } finally {
-      this.busy.set(false);
-    }
+    // Same id on every retry: a sale is created at most once even if approvals interrupt it.
+    const sale = await this.approvals.run((h) => this.api.sell(body, h));
+    this.cart.clear();
+    this.paying.set(false);
+    const receipt = await this.api.receipt(sale.id).catch(() => null);
+    this.done.set({ receiptNo: sale.receiptNo, change: sale.change, receipt, offline: false });
+    if (receipt) await this.print(receipt, payments.some((p) => p.method === 'CASH'));
+    void this.state.refreshShift();
+  }
+
+  private async completeOffline(payments: PaymentDraft[], id: string) {
+    const r = await this.offlineTill.sell(payments, id);
+    this.cart.clear();
+    this.paying.set(false);
+    this.done.set({ receiptNo: r.receiptNo, change: r.change, receipt: r.receipt, offline: true });
+    await this.print(r.receipt, payments.some((p) => p.method === 'CASH'));
   }
 
   protected async print(receipt: ReceiptDoc | null, openDrawer = false) {

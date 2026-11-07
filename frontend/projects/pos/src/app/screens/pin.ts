@@ -1,7 +1,9 @@
 import { ChangeDetectionStrategy, Component, inject, input, signal, viewChild } from '@angular/core';
 import { Router } from '@angular/router';
 import { apiResource, humanMessage, toApiError } from 'ui';
-import { type PinUser, PosSession } from '../device/pos-session';
+import { OfflinePinError, type PinUser, PosSession } from '../device/pos-session';
+import { PinVerifiers } from '../offline/pin-verifier';
+import { isOfflineError, SyncEngine } from '../offline/sync-engine';
 import { PinPad } from './pin-pad';
 
 @Component({
@@ -12,6 +14,9 @@ import { PinPad } from './pin-pad';
     <div class="wrap">
       <header class="row-between">
         <div><strong>{{ session.device()?.name }}</strong></div>
+        @if (!sync.online()) {
+          <span class="small offline" data-testid="pin-offline">Offline</span>
+        }
         @if (reason() === 'expired') {
           <span class="small muted">Session ended. Sign in again.</span>
         }
@@ -57,6 +62,7 @@ import { PinPad } from './pin-pad';
     .people { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: var(--s3); }
     .person { display: flex; flex-direction: column; align-items: center; gap: var(--s2); padding: var(--s5) var(--s3); font: inherit; font-weight: 600; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); cursor: pointer; box-shadow: var(--shadow); }
     .person:hover { border-color: var(--accent); }
+    .offline { background: var(--warn-soft); color: var(--warn); padding: 2px 8px; border-radius: 999px; }
     .avatar { width: 56px; height: 56px; border-radius: 50%; background: var(--accent-soft); color: var(--accent); display: grid; place-items: center; font-size: 20px; }
   `,
 })
@@ -65,7 +71,21 @@ export class Pin {
   private readonly router = inject(Router);
   readonly reason = input<string>();
 
-  protected readonly users = apiResource({ loader: () => this.session.pinPad() });
+  protected readonly sync = inject(SyncEngine);
+  private readonly verifiers = inject(PinVerifiers);
+  /** Online: the API's PIN pad. Offline: staff from the last sync who have signed in on this till before. */
+  protected readonly users = apiResource({
+    loader: async () => {
+      try {
+        return await this.session.pinPad();
+      } catch (e) {
+        if (!isOfflineError(e)) throw e;
+        this.sync.online.set(false);
+        const known = new Set(await this.verifiers.known());
+        return (this.sync.snapshot()?.users ?? []).filter((u) => known.has(u.id)).map((u) => ({ id: u.id, name: u.name }));
+      }
+    },
+  });
   protected readonly selected = signal<PinUser | null>(null);
   protected readonly busy = signal(false);
   protected readonly error = signal<string | null>(null);
@@ -91,9 +111,18 @@ export class Pin {
     this.busy.set(true);
     this.error.set(null);
     try {
-      await this.session.pinLogin(u.id, pin);
+      await this.session.pinLogin(u, pin);
       await this.router.navigateByUrl('/till');
     } catch (e) {
+      if (e instanceof OfflinePinError) {
+        this.error.set(
+          e.result === 'wrong' ? 'Wrong PIN. Try again.'
+          : e.result === 'locked' ? 'Too many wrong PINs. Try again in 15 minutes.'
+          : 'Offline: only staff who have signed in on this till before can sign in.',
+        );
+        this.pad()?.clear();
+        return;
+      }
       const err = toApiError(e);
       this.error.set(err.code === 'UNAUTHENTICATED' ? 'Wrong PIN. Try again.' : humanMessage(err));
       this.pad()?.clear();

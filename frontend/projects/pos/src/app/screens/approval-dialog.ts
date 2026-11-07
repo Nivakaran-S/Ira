@@ -2,6 +2,8 @@ import { ChangeDetectionStrategy, Component, computed, effect, inject, signal, v
 import { humanMessage, toApiError, UiDialog } from 'ui';
 import { ACTION_LABELS, Approvals } from '../api/approvals';
 import { PosApi } from '../api/pos-api';
+import { PinVerifiers } from '../offline/pin-verifier';
+import { SyncEngine } from '../offline/sync-engine';
 import { PinPad } from './pin-pad';
 
 /** Manager approval: pick an approver who holds the permission, they enter their PIN on this till. */
@@ -27,7 +29,7 @@ import { PinPad } from './pin-pad';
                 }
               </div>
             } @else if (!loading()) {
-              <p>Nobody with a PIN on this till can approve this.</p>
+              <p>Nobody {{ approvals.pending()?.mode === 'offline' ? 'who has signed in on this till before' : 'with a PIN on this till' }} can approve this.</p>
             }
           }
           @if (error()) {
@@ -46,6 +48,8 @@ import { PinPad } from './pin-pad';
 export class ApprovalDialog {
   protected readonly approvals = inject(Approvals);
   private readonly api = inject(PosApi);
+  private readonly sync = inject(SyncEngine);
+  private readonly verifiers = inject(PinVerifiers);
   protected readonly approvers = signal<{ id: string; name: string }[]>([]);
   protected readonly approver = signal<{ id: string; name: string } | null>(null);
   protected readonly loading = signal(false);
@@ -62,8 +66,7 @@ export class ApprovalDialog {
       this.approvers.set([]);
       if (!req) return;
       this.loading.set(true);
-      this.api
-        .approvers(req.action)
+      this.approverList(req.action, req.mode)
         .then((list) => {
           this.approvers.set(list);
           if (list.length === 1) this.approver.set(list[0]);
@@ -73,11 +76,26 @@ export class ApprovalDialog {
     });
   }
 
+  /** Offline: staff from the last sync holding the permission who have signed in on this till before. */
+  private async approverList(action: string, mode: 'online' | 'offline') {
+    if (mode === 'online') return this.api.approvers(action);
+    const known = new Set(await this.verifiers.known());
+    return (this.sync.snapshot()?.users ?? []).filter((u) => u.permissions.includes(action) && known.has(u.id)).map((u) => ({ id: u.id, name: u.name }));
+  }
+
   protected async approve(approverId: string, pin: string) {
     const req = this.approvals.pending();
     if (!req) return;
     this.busy.set(true);
     this.error.set(null);
+    if (req.mode === 'offline') {
+      const r = await this.verifiers.verify(approverId, pin);
+      this.busy.set(false);
+      if (r === 'ok') return req.resolve(approverId);
+      this.error.set(r === 'locked' ? 'Too many wrong PINs. Try again in 15 minutes.' : 'Wrong PIN.');
+      this.pad()?.clear();
+      return;
+    }
     try {
       const { stepUpToken } = await this.api.stepUp(approverId, pin, req.action);
       req.resolve(stepUpToken);

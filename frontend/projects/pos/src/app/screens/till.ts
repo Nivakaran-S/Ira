@@ -1,6 +1,7 @@
 import { ChangeDetectionStrategy, Component, inject, type OnInit } from '@angular/core';
 import { Router, RouterLink, RouterLinkActive, RouterOutlet } from '@angular/router';
-import { humanMessage, toApiError } from 'ui';
+import { DatePipe } from '@angular/common';
+import { ApiError, humanMessage, toApiError } from 'ui';
 import { PosSession } from '../device/pos-session';
 import { HardwareBridge } from '../hardware/bridge';
 import { TillState } from '../till-state';
@@ -10,7 +11,7 @@ import { ApprovalDialog } from './approval-dialog';
 @Component({
   selector: 'pos-till',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [RouterOutlet, RouterLink, RouterLinkActive, ApprovalDialog],
+  imports: [DatePipe, RouterOutlet, RouterLink, RouterLinkActive, ApprovalDialog],
   template: `
     <div class="till">
       <header class="bar">
@@ -21,6 +22,17 @@ import { ApprovalDialog } from './approval-dialog';
             <span class="pill ok" data-testid="shift-open">Shift open</span>
           } @else if (state.loaded()) {
             <span class="pill warn">No shift</span>
+          }
+          @if (state.sync.online()) {
+            <span class="pill ok" data-testid="online">Online</span>
+          } @else {
+            <span class="pill warn" data-testid="offline">Offline</span>
+          }
+          @if (state.sync.outbox()) {
+            <span class="pill warn" data-testid="outbox" title="Offline entries waiting to sync">{{ state.sync.outbox() }} to sync</span>
+          }
+          @if (state.sync.lastContactAt(); as at) {
+            <span class="small muted" title="Last successful sync">Synced {{ at | date: 'shortTime' }}</span>
           }
           @if (bridge.ready()) {
             <span class="pill" title="Receipt printer connected">Printer</span>
@@ -37,6 +49,9 @@ import { ApprovalDialog } from './approval-dialog';
           <button class="btn" type="button" (click)="lock()">Lock</button>
         </div>
       </header>
+      @if (state.offline() && !state.sync.offlineAllowed().ok) {
+        <div class="banner" role="alert" data-testid="offline-stop">{{ offlineReason() }}</div>
+      }
       @if (state.error()) {
         <div class="banner" role="alert">
           {{ errorText() }} <button class="btn small" type="button" (click)="state.load()">Retry</button>
@@ -72,7 +87,13 @@ export class Till implements OnInit {
   }
 
   protected errorText() {
-    return humanMessage(toApiError(this.state.error()));
+    const e = this.state.error();
+    return e instanceof Error && !(e instanceof ApiError) ? e.message : humanMessage(toApiError(e));
+  }
+
+  protected offlineReason() {
+    const a = this.state.sync.offlineAllowed();
+    return a.ok ? '' : a.reason;
   }
 
   protected async lock() {

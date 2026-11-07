@@ -18,6 +18,7 @@ const ITEMS: NavItem[] = [
   { path: '/roles', label: 'Roles', anyOf: ['role.manage'] },
   { path: '/users', label: 'Users', anyOf: ['user.manage'] },
   { path: '/devices', label: 'Devices', anyOf: ['device.enroll', 'device.revoke'] },
+  { path: '/offline-review', label: 'Offline review', anyOf: ['sync.review'] },
   { path: '/audit', label: 'Audit log', anyOf: ['audit.view'] },
   { path: '/settings', label: 'Settings', anyOf: ['settings.manage'] },
 ];

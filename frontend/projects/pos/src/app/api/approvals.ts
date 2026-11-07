@@ -13,7 +13,9 @@ export const ACTION_LABELS: Record<string, string> = {
 
 export interface ApprovalRequest {
   action: string;
-  resolve(token: string): void;
+  /** Online: resolves with a step-up token from the API. Offline: with the approver's user id, PIN checked locally. */
+  mode: 'online' | 'offline';
+  resolve(tokenOrUserId: string): void;
   reject(): void;
 }
 
@@ -31,10 +33,11 @@ export class ApprovalCancelled extends Error {
 export class Approvals {
   readonly pending = signal<ApprovalRequest | null>(null);
 
-  ask(action: string): Promise<string> {
+  ask(action: string, mode: 'online' | 'offline' = 'online'): Promise<string> {
     return new Promise((resolve, reject) => {
       this.pending.set({
         action,
+        mode,
         resolve: (t) => {
           this.pending.set(null);
           resolve(t);
@@ -60,5 +63,12 @@ export class Approvals {
       }
     }
     throw new Error('Too many approvals requested');
+  }
+
+  /** Offline: one local approval per action, returned for the outbox entry. */
+  async collectOffline(actions: string[]): Promise<{ action: string; approverId: string }[]> {
+    const out: { action: string; approverId: string }[] = [];
+    for (const action of actions) out.push({ action, approverId: await this.ask(action, 'offline') });
+    return out;
   }
 }

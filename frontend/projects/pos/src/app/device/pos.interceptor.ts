@@ -5,6 +5,7 @@ import { catchError, from, type Observable, switchMap, throwError } from 'rxjs';
 import { ApiError, toApiError } from 'ui';
 import { signRequest } from './device-signer';
 import { IS_REFRESH, PosSession } from './pos-session';
+import { SyncEngine } from '../offline/sync-engine';
 
 /** Serialise the body ourselves so the bytes we hash are the bytes we send. */
 function serialise(req: HttpRequest<unknown>): { req: HttpRequest<unknown>; text: string } {
@@ -37,10 +38,11 @@ export const posInterceptor: HttpInterceptorFn = (req, next) => {
   if (!req.url.startsWith('/api/')) return next(req);
   const session = inject(PosSession);
   const router = inject(Router);
+  const sync = inject(SyncEngine);
 
   const onDeviceRejected = (err: ApiError) => {
     if (err.code === 'DEVICE_REVOKED' || (err.code === 'DEVICE_SIGNATURE_INVALID' && req.url === '/api/devices/whoami')) {
-      void session.forgetDevice().then(() => router.navigateByUrl(`/enroll?reason=${err.code === 'DEVICE_REVOKED' ? 'revoked' : 'unknown'}`));
+      void Promise.all([sync.wipe(), session.forgetDevice()]).then(() => router.navigateByUrl(`/enroll?reason=${err.code === 'DEVICE_REVOKED' ? 'revoked' : 'unknown'}`));
     }
   };
 

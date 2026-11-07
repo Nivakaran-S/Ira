@@ -19,6 +19,7 @@ export const BACKOFFICE_ROUTES: Routes = [
       { path: 'shifts', title: 'Shifts', loadComponent: () => import('./shifts').then((m) => m.Shifts) },
       { path: 'reports', title: 'Reports', loadComponent: () => import('./reports').then((m) => m.Reports) },
       { path: 'settings', title: 'Settings', loadComponent: () => import('./settings').then((m) => m.Settings) },
+      { path: 'offline-review', title: 'Offline review', loadComponent: () => import('./quarantine').then((m) => m.Quarantine) },
       { path: 'audit', title: 'Audit log', loadComponent: () => import('./audit').then((m) => m.Audit) },
     ],
   },

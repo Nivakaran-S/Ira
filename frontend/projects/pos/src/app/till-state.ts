@@ -1,15 +1,22 @@
-import { computed, inject, Injectable, signal } from '@angular/core';
+import { computed, effect, inject, Injectable, signal } from '@angular/core';
 import { formatMinor, formatQty, parseMinor } from '@pos/shared';
-import { type PosCatalog, PosApi, type ShiftReport } from './api/pos-api';
+import { PosApi, type ShiftReport } from './api/pos-api';
+import { PosSession } from './device/pos-session';
+import { isOfflineError, SyncEngine } from './offline/sync-engine';
 import { Cart } from './sell/cart';
 
-/** What the till knows right now: catalog, the open shift, who is signed in. */
+/**
+ * What the till knows right now: catalog (from the offline copy), the open shift, who is signed in.
+ * Online, shift and cashier come from the API; offline, from the last sync and the local sign-in.
+ */
 @Injectable({ providedIn: 'root' })
 export class TillState {
   private readonly api = inject(PosApi);
   private readonly cart = inject(Cart);
+  private readonly session = inject(PosSession);
+  readonly sync = inject(SyncEngine);
 
-  readonly catalog = signal<PosCatalog | null>(null);
+  readonly catalog = this.sync.catalog;
   readonly shift = signal<ShiftReport | null>(null);
   readonly cashier = signal<{ id: string; name: string } | null>(null);
   readonly tenantName = signal('');
@@ -18,24 +25,56 @@ export class TillState {
 
   readonly currency = computed(() => this.catalog()?.currency ?? 'LKR');
   readonly shiftOpen = computed(() => this.shift()?.shift.status === 'OPEN');
+  /** Selling goes through the outbox: nobody holds an API session, or the API is unreachable. */
+  readonly offline = computed(() => !this.session.accessToken() || !this.sync.online());
+
+  constructor() {
+    effect(() => this.cart.settings.set(this.catalog()?.settings ?? null));
+  }
 
   async load() {
     this.error.set(null);
+    await this.sync.init();
+    await this.sync.syncNow().catch(() => undefined);
+    const snap = this.sync.snapshot();
+    const offlineUser = this.session.offlineUser();
     try {
-      const [catalog, shift, me] = await Promise.all([this.api.catalog(), this.api.shift(), this.api.me()]);
-      this.catalog.set(catalog);
-      this.cart.settings.set(catalog.settings);
+      if (offlineUser || !this.session.accessToken()) throw Object.assign(new Error('offline session'), { offlineSession: true });
+      const [shift, me] = await Promise.all([this.api.shift(), this.api.me()]);
       this.shift.set(shift.shift);
       this.cashier.set(me.user);
       this.tenantName.set(me.tenant.name);
-      this.loaded.set(true);
+      await this.sync.setShift(shift.shift);
     } catch (e) {
-      this.error.set(e);
+      if (!(e as { offlineSession?: boolean }).offlineSession && !isOfflineError(e)) {
+        this.error.set(e);
+        return;
+      }
+      this.shift.set(snap?.shift ?? null);
+      this.cashier.set(offlineUser);
+      this.tenantName.set(snap?.tenantName ?? '');
     }
+    if (!this.catalog()) {
+      this.error.set(new Error('This till has no catalog yet. Connect it to the internet once.'));
+      return;
+    }
+    this.loaded.set(true);
   }
 
   async refreshShift() {
-    this.shift.set((await this.api.shift()).shift);
+    if (this.offline()) return;
+    try {
+      const s = (await this.api.shift()).shift;
+      this.shift.set(s);
+      await this.sync.setShift(s);
+    } catch (e) {
+      if (!isOfflineError(e)) throw e;
+    }
+  }
+
+  async setShift(s: ShiftReport | null) {
+    this.shift.set(s);
+    await this.sync.setShift(s);
   }
 
   reset() {

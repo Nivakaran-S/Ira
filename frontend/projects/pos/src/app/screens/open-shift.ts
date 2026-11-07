@@ -10,6 +10,9 @@ import { TillState } from '../till-state';
     <section class="card stack open" data-testid="open-shift">
       <h1>Open a shift</h1>
       <p class="muted">Count the cash in the drawer before the first sale.</p>
+      @if (state.offline()) {
+        <p class="error-text">Opening a shift needs a connection to the server.</p>
+      }
       <label>Opening float
         <input inputmode="decimal" data-testid="float" [value]="float()" (input)="float.set(val($event))" (keydown.enter)="open()" />
       </label>
@@ -27,7 +30,7 @@ import { TillState } from '../till-state';
 })
 export class OpenShift {
   private readonly api = inject(PosApi);
-  private readonly state = inject(TillState);
+  protected readonly state = inject(TillState);
   protected readonly float = signal('0');
   protected readonly busy = signal(false);
   protected readonly error = signal<string | null>(null);
@@ -42,7 +45,7 @@ export class OpenShift {
     this.busy.set(true);
     this.error.set(null);
     try {
-      this.state.shift.set(await this.api.openShift(amount));
+      await this.state.setShift(await this.api.openShift(amount));
     } catch (e) {
       const err = toApiError(e);
       if (err.code === 'CONFLICT') await this.state.refreshShift();
