@@ -147,13 +147,14 @@ model PlatformAuditEvent {
 // never reference another tenant's row: Postgres FK checks do not apply RLS.
 
 model Store {
-  id        String     @id @default(uuid(7)) @db.Uuid
-  tenantId  String     @db.Uuid
+  id        String       @id @default(uuid(7)) @db.Uuid
+  tenantId  String       @db.Uuid
   name      String
   code      String
-  createdAt DateTime   @default(now())
-  tenant    Tenant     @relation(fields: [tenantId], references: [id])
+  createdAt DateTime     @default(now())
+  tenant    Tenant       @relation(fields: [tenantId], references: [id])
   registers Register[]
+  stock     StockLevel[]
 
   @@unique([tenantId, id])
   @@unique([tenantId, code])
@@ -166,9 +167,12 @@ model Register {
   name        String
   code        String
   createdAt   DateTime           @default(now())
+  /// Last receipt sequence handed out for this register.
+  receiptSeq  Int                @default(0)
   store       Store              @relation(fields: [tenantId, storeId], references: [tenantId, id])
   devices     Device[]
   enrollments DeviceEnrollment[]
+  shifts      Shift[]
 
   @@unique([tenantId, id])
   @@unique([tenantId, code])
@@ -297,4 +301,297 @@ model AuditEvent {
   createdAt      DateTime
 
   @@index([tenantId, seq])
+}
+
+// ─────────────── Catalog ───────────────
+
+model TaxRate {
+  id        String         @id @default(uuid(7)) @db.Uuid
+  tenantId  String         @db.Uuid
+  name      String
+  rateBp    Int
+  compound  Boolean        @default(false)
+  active    Boolean        @default(true)
+  createdAt DateTime       @default(now())
+  groups    TaxGroupRate[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, name])
+}
+
+model TaxGroup {
+  id        String         @id @default(uuid(7)) @db.Uuid
+  tenantId  String         @db.Uuid
+  name      String
+  createdAt DateTime       @default(now())
+  rates     TaxGroupRate[]
+  products  Product[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, name])
+}
+
+model TaxGroupRate {
+  tenantId String   @db.Uuid
+  groupId  String   @db.Uuid
+  rateId   String   @db.Uuid
+  position Int
+  group    TaxGroup @relation(fields: [tenantId, groupId], references: [tenantId, id], onDelete: Cascade)
+  rate     TaxRate  @relation(fields: [tenantId, rateId], references: [tenantId, id])
+
+  @@id([groupId, rateId])
+}
+
+model Category {
+  id        String    @id @default(uuid(7)) @db.Uuid
+  tenantId  String    @db.Uuid
+  name      String
+  color     String?
+  sortOrder Int       @default(0)
+  createdAt DateTime  @default(now())
+  products  Product[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, name])
+}
+
+model Product {
+  id           String          @id @default(uuid(7)) @db.Uuid
+  tenantId     String          @db.Uuid
+  name         String
+  sku          String?
+  categoryId   String?         @db.Uuid
+  taxGroupId   String?         @db.Uuid
+  price        Int
+  active       Boolean         @default(true)
+  trackStock   Boolean         @default(true)
+  customFields Json            @default("{}")
+  createdAt    DateTime        @default(now())
+  updatedAt    DateTime        @updatedAt
+  category     Category?       @relation(fields: [tenantId, categoryId], references: [tenantId, id])
+  taxGroup     TaxGroup?       @relation(fields: [tenantId, taxGroupId], references: [tenantId, id])
+  stock        StockLevel[]
+  movements    StockMovement[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, sku])
+}
+
+// ─────────────── Inventory ───────────────
+
+model StockLevel {
+  tenantId  String   @db.Uuid
+  storeId   String   @db.Uuid
+  productId String   @db.Uuid
+  qtyMilli  Int      @default(0)
+  updatedAt DateTime @updatedAt
+  store     Store    @relation(fields: [tenantId, storeId], references: [tenantId, id])
+  product   Product  @relation(fields: [tenantId, productId], references: [tenantId, id])
+
+  @@id([storeId, productId])
+}
+
+enum StockReason {
+  SALE
+  REFUND
+  VOID
+  ADJUSTMENT
+  RECEIVE
+  TRANSFER_IN
+  TRANSFER_OUT
+}
+
+/// Append-only.
+model StockMovement {
+  id         String      @id @default(uuid(7)) @db.Uuid
+  tenantId   String      @db.Uuid
+  storeId    String      @db.Uuid
+  productId  String      @db.Uuid
+  deltaMilli Int
+  reason     StockReason
+  refType    String?
+  refId      String?     @db.Uuid
+  note       String?
+  userId     String?     @db.Uuid
+  createdAt  DateTime    @default(now())
+  product    Product     @relation(fields: [tenantId, productId], references: [tenantId, id])
+
+  @@index([tenantId, productId, createdAt])
+}
+
+// ─────────────── Shifts and cash ───────────────
+
+enum ShiftStatus {
+  OPEN
+  CLOSED
+}
+
+model Shift {
+  id           String         @id @default(uuid(7)) @db.Uuid
+  tenantId     String         @db.Uuid
+  storeId      String         @db.Uuid
+  registerId   String         @db.Uuid
+  status       ShiftStatus    @default(OPEN)
+  openedById   String         @db.Uuid
+  openedAt     DateTime       @default(now())
+  openingFloat Int
+  closedById   String?        @db.Uuid
+  closedAt     DateTime?
+  expectedCash Int?
+  countedCash  Int?
+  variance     Int?
+  note         String?
+  register     Register       @relation(fields: [tenantId, registerId], references: [tenantId, id])
+  movements    CashMovement[]
+  sales        Sale[]
+
+  @@unique([tenantId, id])
+  @@index([tenantId, registerId, openedAt])
+}
+
+enum CashMovementType {
+  PAY_IN
+  PAY_OUT
+  NO_SALE
+}
+
+model CashMovement {
+  id           String           @id @default(uuid(7)) @db.Uuid
+  tenantId     String           @db.Uuid
+  shiftId      String           @db.Uuid
+  type         CashMovementType
+  amount       Int
+  reason       String
+  userId       String           @db.Uuid
+  approvedById String?          @db.Uuid
+  createdAt    DateTime         @default(now())
+  shift        Shift            @relation(fields: [tenantId, shiftId], references: [tenantId, id])
+}
+
+// ─────────────── Sales ───────────────
+
+enum SaleStatus {
+  COMPLETED
+  VOIDED
+}
+
+enum PaymentMethod {
+  CASH
+  CARD
+  OTHER
+}
+
+model Sale {
+  id               String     @id @db.Uuid
+  tenantId         String     @db.Uuid
+  storeId          String     @db.Uuid
+  registerId       String     @db.Uuid
+  shiftId          String     @db.Uuid
+  deviceId         String     @db.Uuid
+  cashierId        String     @db.Uuid
+  receiptNo        String
+  status           SaleStatus @default(COMPLETED)
+  pricesIncludeTax Boolean
+  subtotal         Int
+  discountTotal    Int
+  taxTotal         Int
+  total            Int
+  /// Cash rounding applied on top of total (signed).
+  rounding         Int        @default(0)
+  /// Amount due: total + rounding.
+  due              Int
+  change           Int        @default(0)
+  taxes            Json
+  cartDiscount     Json?
+  approvals        Json       @default("[]")
+  soldAt           DateTime
+  createdAt        DateTime   @default(now())
+  voidedAt         DateTime?
+  voidedById       String?    @db.Uuid
+  voidReason       String?
+  shift            Shift      @relation(fields: [tenantId, shiftId], references: [tenantId, id])
+  lines            SaleLine[]
+  payments         Payment[]
+  refunds          Refund[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, receiptNo])
+  @@index([tenantId, soldAt])
+}
+
+model SaleLine {
+  id               String       @id @default(uuid(7)) @db.Uuid
+  tenantId         String       @db.Uuid
+  saleId           String       @db.Uuid
+  position         Int
+  productId        String       @db.Uuid
+  name             String
+  sku              String?
+  unitPrice        Int
+  listPrice        Int
+  qtyMilli         Int
+  gross            Int
+  discount         Int
+  discounts        Json
+  net              Int
+  tax              Int
+  taxes            Json
+  total            Int
+  note             String?
+  refundedQtyMilli Int          @default(0)
+  sale             Sale         @relation(fields: [tenantId, saleId], references: [tenantId, id], onDelete: Cascade)
+  refundLines      RefundLine[]
+
+  @@unique([tenantId, id])
+}
+
+model Payment {
+  id        String        @id @default(uuid(7)) @db.Uuid
+  tenantId  String        @db.Uuid
+  saleId    String        @db.Uuid
+  method    PaymentMethod
+  amount    Int
+  tendered  Int?
+  change    Int           @default(0)
+  reference String?
+  sale      Sale          @relation(fields: [tenantId, saleId], references: [tenantId, id], onDelete: Cascade)
+}
+
+model Refund {
+  id           String        @id @db.Uuid
+  tenantId     String        @db.Uuid
+  saleId       String        @db.Uuid
+  storeId      String        @db.Uuid
+  registerId   String        @db.Uuid
+  shiftId      String        @db.Uuid
+  deviceId     String        @db.Uuid
+  userId       String        @db.Uuid
+  approvedById String?       @db.Uuid
+  receiptNo    String
+  method       PaymentMethod
+  reason       String
+  restock      Boolean
+  total        Int
+  taxTotal     Int
+  /// Cash rounding on the payout (signed); paid out = total + rounding.
+  rounding     Int           @default(0)
+  createdAt    DateTime      @default(now())
+  sale         Sale          @relation(fields: [tenantId, saleId], references: [tenantId, id])
+  lines        RefundLine[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, receiptNo])
+}
+
+model RefundLine {
+  id         String   @id @default(uuid(7)) @db.Uuid
+  tenantId   String   @db.Uuid
+  refundId   String   @db.Uuid
+  saleLineId String   @db.Uuid
+  qtyMilli   Int
+  net        Int
+  tax        Int
+  total      Int
+  refund     Refund   @relation(fields: [tenantId, refundId], references: [tenantId, id], onDelete: Cascade)
+  saleLine   SaleLine @relation(fields: [tenantId, saleLineId], references: [tenantId, id])
 }

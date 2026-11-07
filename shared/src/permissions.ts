@@ -15,6 +15,8 @@ export const PERMISSIONS = [
   'shift.close',
   'stock.adjust',
   'report.view',
+  'catalog.manage',
+  'settings.manage',
 ] as const;
 
 export type Permission = (typeof PERMISSIONS)[number];

@@ -11,9 +11,15 @@ import { IdentityModule } from './modules/identity/identity.module.js';
 import { PlatformModule } from './modules/platform/platform.module.js';
 import { SecurityModule } from './security/security.module.js';
 import { HealthController } from './modules/health/health.controller.js';
+import { SettingsModule } from './modules/settings/settings.module.js';
+import { CatalogModule } from './modules/catalog/catalog.module.js';
+import { InventoryModule } from './modules/inventory/inventory.module.js';
+import { SalesModule } from './modules/sales/sales.module.js';
+import { ReportingModule } from './modules/reporting/reporting.module.js';
 
 @Module({
-  imports: [ScheduleModule.forRoot(), ConfigModule, InfraModule, SecurityModule, AuditModule, AccessModule, IdentityModule, BackofficeModule, PlatformModule],
+  imports: [ScheduleModule.forRoot(), ConfigModule, InfraModule, SecurityModule, AuditModule, AccessModule, IdentityModule, BackofficeModule, PlatformModule,
+    SettingsModule, CatalogModule, InventoryModule, SalesModule, ReportingModule],
   controllers: [HealthController],
   providers: [{ provide: APP_FILTER, useClass: AppErrorFilter }],
 })

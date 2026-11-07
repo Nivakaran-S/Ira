@@ -8,12 +8,12 @@ import { ENV, type Env } from '../../config/env.js';
 import type { Prisma } from '../../generated/prisma/client.js';
 import { PrismaService, type Tx } from '../../infra/prisma.service.js';
 import { TenantDb } from '../../infra/tenant-db.service.js';
-import { CapabilitiesService } from '../access/capabilities.service.js';
+import { CapabilitiesService, OWNER_ROLE_NAME } from '../access/capabilities.service.js';
 import { TenantResolverService } from '../access/tenant-resolver.service.js';
 import type { platformAuditContext } from '../audit/audit-context.js';
 import { AuditService } from '../audit/audit.service.js';
 
-export const OWNER_ROLE_NAME = 'Owner';
+export { OWNER_ROLE_NAME };
 export const OWNER_SETUP_TTL_MS = 7 * 24 * 3_600_000;
 
 type Ctx = ReturnType<typeof platformAuditContext>;

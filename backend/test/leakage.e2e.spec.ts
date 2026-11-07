@@ -8,9 +8,14 @@ import { enrollTestDevice, signedHeaders, type TestDevice } from './helpers/devi
 import { createRegister, createStore, createTenant, createUser, hostFor } from './helpers/fixtures.js';
 import { bearer, loginPassword } from './helpers/http.js';
 import { flushRedis } from './helpers/redis.js';
+import { createProduct, createSriLankaTaxes } from './helpers/till.js';
+import { v7 as uuidv7 } from 'uuid';
 
 const PW = 'correct horse battery staple';
-const LIST_ENDPOINTS = ['/api/stores', '/api/registers', '/api/users', '/api/roles', '/api/devices', '/api/audit'];
+const LIST_ENDPOINTS = [
+  '/api/stores', '/api/registers', '/api/users', '/api/roles', '/api/devices', '/api/audit',
+  '/api/tax-rates', '/api/tax-groups', '/api/categories', '/api/products', '/api/shifts', '/api/sales',
+];
 
 interface World {
   tenantId: string;
@@ -19,6 +24,9 @@ interface World {
   registerId: string;
   roleId: string;
   userId: string;
+  productId: string;
+  categoryId: string;
+  saleId: string;
   device: TestDevice;
   ids: Set<string>;
 }
@@ -31,11 +39,26 @@ async function buildTenant(app: NestExpressApplication, slug: string): Promise<W
   const register = await createRegister(tenantId, store.id);
   const device = await enrollTestDevice(tenantId, register.id, owner.user.id);
   const token = await loginPassword(app, slug, `owner@${slug}.lk`, PW); // also writes an audit event
-  const audit = await ownerDb().auditEvent.findMany({ where: { tenantId }, select: { id: true } });
+  const db = ownerDb();
+  const { group, vat, sscl } = await createSriLankaTaxes(tenantId);
+  const category = await db.category.create({ data: { tenantId, name: 'Drinks' } });
+  const product = await createProduct(tenantId, { name: 'Tea', price: 500, taxGroupId: group.id });
+  const shift = await db.shift.create({ data: { tenantId, storeId: store.id, registerId: register.id, openedById: staff.user.id, openingFloat: 0 } });
+  const sale = await db.sale.create({
+    data: {
+      id: uuidv7(), tenantId, storeId: store.id, registerId: register.id, shiftId: shift.id, deviceId: device.id, cashierId: staff.user.id,
+      receiptNo: `${slug}-1`, pricesIncludeTax: true, subtotal: 500, discountTotal: 0, taxTotal: 0, total: 500, due: 500, taxes: [], soldAt: new Date(),
+    },
+  });
+  const audit = await db.auditEvent.findMany({ where: { tenantId }, select: { id: true } });
   const ids = new Set([
     tenantId, owner.user.id, owner.role.id, staff.user.id, staff.role.id, store.id, register.id, device.id, ...audit.map((a) => a.id),
+    group.id, vat.id, sscl.id, category.id, product.id, shift.id, sale.id,
   ]);
-  return { tenantId, token, storeId: store.id, registerId: register.id, roleId: staff.role.id, userId: staff.user.id, device, ids };
+  return {
+    tenantId, token, storeId: store.id, registerId: register.id, roleId: staff.role.id, userId: staff.user.id, device, ids,
+    productId: product.id, categoryId: category.id, saleId: sale.id,
+  };
 }
 
 describe('cross-tenant isolation through the API', () => {
@@ -72,6 +95,17 @@ describe('cross-tenant isolation through the API', () => {
     await asA(http().post('/api/registers')).send({ storeId: b.storeId, name: 'x', code: 'X1' }).expect(404);
     await asA(http().post('/api/users')).send({ name: 'x', roleIds: [b.roleId] }).expect(404);
     await asA(http().post('/api/devices/enrollments')).send({ registerId: b.registerId }).expect(404);
+    await asA(http().post('/api/products')).send({ name: 'x', price: 1, categoryId: b.categoryId }).expect(404);
+    await asA(http().post('/api/stock/adjust')).send({ storeId: b.storeId, productId: a.productId, deltaMilli: 1000, note: 'x' }).expect(404);
+    await asA(http().post('/api/stock/adjust')).send({ storeId: a.storeId, productId: b.productId, deltaMilli: 1000, note: 'x' }).expect(404);
+  });
+
+  it('A cannot read B sales, shifts or products by id', async () => {
+    await asA(http().get(`/api/sales/${b.saleId}`)).expect(404);
+    await asA(http().get(`/api/sales/${b.saleId}/receipt`)).expect(404);
+    await asA(http().patch(`/api/products/${b.productId}`)).send({ price: 1 }).expect(404);
+    const p = await ownerDb().product.findUniqueOrThrow({ where: { id: b.productId } });
+    expect(p.price).toBe(500);
   });
 
   it('A cannot modify B rows by id', async () => {

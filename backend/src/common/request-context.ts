@@ -27,4 +27,6 @@ export interface RequestWithContext extends Request {
   principal?: Principal;
   device?: { id: string; registerId: string };
   rawBody?: Buffer;
+  /** Approver user id per action, set when a manager step-up was consumed. */
+  stepUpApprovals?: Partial<Record<string, string>>;
 }

@@ -1,0 +1,21 @@
+{
+  "name": "@pos/hardware-bridge",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Runs on each till: ESC/POS receipts, cash drawer and scale, for the paired device only. Listens on 127.0.0.1.",
+  "bin": { "pos-bridge": "dist/main.js" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/main.js",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@pos/shared": "^0.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "typescript": "~5.9",
+    "vitest": "^3.2.7"
+  }
+}

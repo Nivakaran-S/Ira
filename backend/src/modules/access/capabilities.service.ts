@@ -6,6 +6,7 @@ import { RedisService } from '../../infra/redis.service.js';
 import { TenantDb } from '../../infra/tenant-db.service.js';
 
 const MODULE_CACHE_TTL_SEC = 60;
+export const OWNER_ROLE_NAME = 'Owner';
 const VALID_PERMISSIONS = new Set<string>(PERMISSIONS);
 
 @Injectable()
@@ -38,9 +39,11 @@ export class CapabilitiesService {
     const user = await this.tenantDb.run(tenantId, (tx) =>
       tx.user.findFirst({
         where: { id: userId, status: 'ACTIVE' },
-        select: { roles: { select: { role: { select: { permissions: true } } } } },
+        select: { roles: { select: { role: { select: { permissions: true, name: true, isSystem: true } } } } },
       }),
     );
+    // The system Owner role holds every permission, including ones added after the tenant was created.
+    if (user?.roles.some((r) => r.role.isSystem && r.role.name === OWNER_ROLE_NAME)) return new Set(PERMISSIONS);
     const all = user?.roles.flatMap((r) => r.role.permissions) ?? [];
     return new Set(all.filter((p): p is Permission => VALID_PERMISSIONS.has(p)));
   }

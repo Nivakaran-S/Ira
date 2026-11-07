@@ -9,3 +9,7 @@ coverage/
 .superpowers/
 !.env.test
 backend/src/generated/
+
+# hardware bridge (per-till config and pairing)
+hardware-bridge/bridge.config.json
+hardware-bridge/bridge.pairing.json

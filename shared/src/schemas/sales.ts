@@ -1,0 +1,67 @@
+import { z } from 'zod';
+import { minorAmount } from './catalog.js';
+
+const positiveAmount = z.int().min(1).max(100_000_000_000);
+const qtyMilli = z.int().min(1).max(100_000_000);
+
+export const DiscountSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('percent'), bp: z.int().min(1).max(10_000) }),
+  z.object({ kind: z.literal('amount'), amount: positiveAmount }),
+]);
+
+export const PAYMENT_METHODS = ['CASH', 'CARD', 'OTHER'] as const;
+export type PaymentMethodKey = (typeof PAYMENT_METHODS)[number];
+
+export const PaymentInputSchema = z.object({
+  method: z.enum(PAYMENT_METHODS),
+  amount: positiveAmount,
+  /** Cash handed over; change = tendered − amount. */
+  tendered: minorAmount.optional(),
+  /** Card terminal approval code or slip number. */
+  reference: z.string().trim().max(64).optional(),
+});
+
+export const SaleLineInputSchema = z.object({
+  productId: z.uuid(),
+  qtyMilli,
+  /** Price override (minor units). Needs price.override. */
+  unitPrice: minorAmount.optional(),
+  discount: DiscountSchema.optional(),
+  note: z.string().trim().max(200).optional(),
+});
+
+export const CreateSaleSchema = z.object({
+  /** Client-generated UUIDv7: retries with the same id return the same sale. */
+  id: z.uuid(),
+  lines: z.array(SaleLineInputSchema).min(1).max(500),
+  cartDiscount: DiscountSchema.optional(),
+  payments: z.array(PaymentInputSchema).min(1).max(10),
+  /** What the till showed. Any difference from the server's calculation rejects the sale. */
+  expectedTotal: minorAmount,
+});
+
+export const VoidSaleSchema = z.object({ reason: z.string().trim().min(3).max(200) });
+
+export const CreateRefundSchema = z.object({
+  id: z.uuid(),
+  saleId: z.uuid(),
+  lines: z.array(z.object({ saleLineId: z.uuid(), qtyMilli })).min(1).max(500),
+  method: z.enum(PAYMENT_METHODS),
+  reason: z.string().trim().min(3).max(200),
+  /** Put the goods back on the shelf. */
+  restock: z.boolean().default(true),
+});
+
+export const OpenShiftSchema = z.object({ openingFloat: minorAmount });
+export const CloseShiftSchema = z.object({ countedCash: minorAmount, note: z.string().trim().max(500).optional() });
+export const CashMovementSchema = z.object({
+  type: z.enum(['PAY_IN', 'PAY_OUT', 'NO_SALE']),
+  amount: minorAmount.default(0),
+  reason: z.string().trim().min(3).max(200),
+});
+
+export const ReportRangeSchema = z.object({
+  from: z.iso.datetime({ offset: true }),
+  to: z.iso.datetime({ offset: true }),
+  storeId: z.uuid().optional(),
+});
