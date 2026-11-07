@@ -1,7 +1,9 @@
 import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@angular/core';
 import { CustomerPicker } from './customer-picker';
 import { ModifierPicker } from './modifier-picker';
-import { type Discount, type ReceiptDoc, uuidv7 } from '@pos/shared';
+import { PrescriptionPicker } from './prescription-picker';
+import { Weigh } from './weigh';
+import { type Discount, parseScaleBarcode, type ReceiptDoc, uuidv7 } from '@pos/shared';
 import { humanMessage, toApiError, ToastService, UiDialog } from 'ui';
 import { ApprovalCancelled, Approvals } from '../api/approvals';
 import { type CatalogProduct, PosApi, type TillCustomer } from '../api/pos-api';
@@ -18,7 +20,7 @@ import { ReceiptView } from './receipt-view';
   selector: 'pos-sell',
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { '(window:keydown)': 'onKey($event)' },
-  imports: [UiDialog, OpenShift, PaymentPanel, ReceiptView, CustomerPicker, ModifierPicker],
+  imports: [UiDialog, OpenShift, PaymentPanel, ReceiptView, CustomerPicker, ModifierPicker, Weigh, PrescriptionPicker],
   template: `
     @if (!state.loaded()) {
       <p class="muted pad">Loading the till…</p>
@@ -40,7 +42,8 @@ import { ReceiptView } from './receipt-view';
             @for (p of visible(); track p.id) {
               <button type="button" class="tile" [attr.data-product]="p.name" (click)="add(p)">
                 <span class="name">{{ p.name }}</span>
-                <span class="price">{{ p.hasVariants ? variantCount(p) + ' options' : state.money(p.price) }}</span>
+                <span class="price">{{ p.hasVariants ? variantCount(p) + ' options' : state.money(p.price) + (p.soldByWeight ? ' /kg' : '') }}</span>
+                @if (p.rxRequired) { <span class="rx">Rx</span> }
               </button>
             } @empty {
               <p class="muted">No products match. Products are added in the back office under Catalog.</p>
@@ -135,6 +138,20 @@ import { ReceiptView } from './receipt-view';
       }
     </ui-dialog>
 
+    <ui-dialog [title]="'Weigh ' + (weighing()?.name ?? '')" [open]="!!weighing()" (closed)="weighing.set(null)">
+      @if (weighing(); as p) {
+        <pos-weigh [product]="p" (weighed)="cart.add(p, $event); weighing.set(null)" />
+      }
+    </ui-dialog>
+
+    <ui-dialog title="Prescription" [open]="!!dispensing()" (closed)="dispensing.set(null)">
+      @if (dispensing(); as p) {
+        @if (cart.customer(); as c) {
+          <pos-prescription-picker [product]="p" [customer]="c" (picked)="cart.add(p, $event.qtyMilli, [], $event.itemId); dispensing.set(null)" />
+        }
+      }
+    </ui-dialog>
+
     <ui-dialog title="Customer" [open]="customerOpen()" (closed)="customerOpen.set(false)">
       @if (customerOpen()) {
         <pos-customer-picker (picked)="pickCustomer($event)" />
@@ -218,6 +235,7 @@ import { ReceiptView } from './receipt-view';
     .cust { display: flex; justify-content: space-between; align-items: center; padding: var(--s2) var(--s4); border-bottom: 1px solid var(--border); background: var(--surface-2); }
     .promo { background: var(--ok-soft); color: var(--ok); padding: 0 6px; border-radius: 6px; margin-left: 4px; }
     .promo-row { color: var(--ok); }
+    .rx { font-size: 11px; font-weight: 700; color: var(--danger); border: 1px solid var(--danger); border-radius: 4px; padding: 0 4px; }
     .offline-note { background: var(--warn-soft); color: var(--warn); padding: var(--s2) var(--s3); border-radius: var(--radius); }
     @media (max-width: 820px) { .sell { grid-template-columns: 1fr; } .cart { border-left: none; border-top: 1px solid var(--border); } }
   `,
@@ -240,6 +258,8 @@ export class Sell {
   protected readonly done = signal<{ receiptNo: string; change: number; receipt: ReceiptDoc | null; offline: boolean } | null>(null);
   protected readonly picking = signal<CatalogProduct | null>(null);
   protected readonly modifying = signal<CatalogProduct | null>(null);
+  protected readonly weighing = signal<CatalogProduct | null>(null);
+  protected readonly dispensing = signal<CatalogProduct | null>(null);
   protected readonly tipsOn = computed(() => (this.state.catalog()?.modules ?? []).includes('tables'));
   protected readonly listPrice = listPriceOf;
   protected modText(l: CartLine) {
@@ -283,13 +303,25 @@ export class Sell {
   scan(code: string): boolean {
     const cat = this.state.catalog();
     if (!cat || this.paying() || !this.state.shiftOpen()) return false;
+    // In-store scale labels carry the PLU and the weight (or price) in the code itself.
+    const label = cat.settings.scaleBarcode?.enabled ? parseScaleBarcode(code, cat.settings.scaleBarcode) : null;
+    if (label) {
+      const item = cat.products.find((p) => p.plu === label.plu);
+      if (!item) {
+        this.toasts.error(`No product with PLU ${label.plu}`);
+        return true;
+      }
+      const qty = label.valueType === 'weight' ? label.value : Math.max(1, Math.round((label.value * 1000) / Math.max(1, item.price)));
+      this.cart.add(item, qty);
+      return true;
+    }
     const id = cat.barcodes?.[code];
     const product = cat.products.find((p) => (id ? p.id === id : p.sku === code) && !p.hasVariants);
     if (!product) {
       if (id || /^[0-9]{8,14}$/.test(code)) this.toasts.error(`Unknown barcode ${code}`);
       return false;
     }
-    this.cart.add(product);
+    this.add(product);
     return true;
   }
 
@@ -301,9 +333,14 @@ export class Sell {
     return this.variantsOf(family).length;
   }
 
+  /** A prescription medicine tapped before the customer was on the sale. */
+  private pendingRx: CatalogProduct | null = null;
+
   protected pickCustomer(c: TillCustomer) {
     this.cart.customer.set(c);
     this.customerOpen.set(false);
+    if (this.pendingRx) this.dispensing.set(this.pendingRx);
+    this.pendingRx = null;
   }
 
   protected val(e: Event) {
@@ -312,6 +349,16 @@ export class Sell {
 
   protected add(p: CatalogProduct) {
     if (p.hasVariants) this.picking.set(p);
+    else if (p.rxRequired) {
+      if (this.state.offline()) return this.toasts.error('Prescription medicines can only be sold online.');
+      if (!this.cart.customer()) {
+        this.toasts.info('Prescription medicine: add the customer first.');
+        this.pendingRx = p;
+        this.customerOpen.set(true);
+        return;
+      }
+      this.dispensing.set(p);
+    } else if (p.soldByWeight) this.weighing.set(p);
     else if (p.modifierGroups?.length) this.modifying.set(p);
     else this.cart.add(p);
   }
@@ -414,6 +461,7 @@ export class Sell {
         ...(l.discount ? { discount: l.discount } : {}),
         ...(l.note ? { note: l.note } : {}),
         ...(l.modifiers?.length ? { modifierIds: l.modifiers.map((m) => m.id) } : {}),
+        ...(l.prescriptionItemId ? { prescriptionItemId: l.prescriptionItemId } : {}),
       })),
       ...(this.cart.cartDiscount() ? { cartDiscount: this.cart.cartDiscount()! } : {}),
       payments: payments.map((p) => ({ method: p.method, amount: p.amount, ...(p.tendered ? { tendered: p.tendered } : {}), ...(p.reference ? { reference: p.reference } : {}) })),

@@ -17,6 +17,7 @@ export const BACKOFFICE_ROUTES: Routes = [
       { path: 'customers', title: 'Customers', loadComponent: () => import('./customers').then((m) => m.Customers) },
       { path: 'customers/:id', title: 'Customer', loadComponent: () => import('./customer-detail').then((m) => m.CustomerDetail) },
       { path: 'modifiers', title: 'Modifiers', loadComponent: () => import('./modifiers').then((m) => m.Modifiers) },
+      { path: 'lots', title: 'Lots', loadComponent: () => import('./batches').then((m) => m.Batches) },
       { path: 'tables', title: 'Tables', loadComponent: () => import('./tables').then((m) => m.Tables) },
       { path: 'promotions', title: 'Promotions', loadComponent: () => import('./promotions').then((m) => m.Promotions) },
       { path: 'stock', title: 'Stock', loadComponent: () => import('./stock').then((m) => m.Stock) },

@@ -26,6 +26,10 @@ interface SnapProduct {
   parentId?: string | null;
   variantLabel?: string | null;
   modifierGroupIds?: string[];
+  soldByWeight?: boolean;
+  plu?: string | null;
+  tracksBatches?: boolean;
+  rxRequired?: boolean;
 }
 export interface Snapshot {
   cursor: string;
@@ -117,6 +121,8 @@ export class SyncEngine {
           id: p.id, name: p.name, sku: p.sku, price: p.price, categoryId: p.categoryId, trackStock: p.trackStock,
           taxes: p.taxGroupId ? (s.taxGroups[p.taxGroupId]?.rates ?? []) : [],
           hasVariants: !!p.hasVariants, parentId: p.parentId ?? null, variantLabel: p.variantLabel ?? null,
+          soldByWeight: !!p.soldByWeight && (s.modules ?? []).includes('weighed-items'), plu: p.plu ?? null,
+          tracksBatches: !!p.tracksBatches, rxRequired: !!p.rxRequired && (s.modules ?? []).includes('prescriptions'),
           modifierGroups: (s.modules ?? []).includes('modifiers')
             ? (p.modifierGroupIds ?? []).map((id) => s.modifierGroups?.[id]).filter((g): g is ModifierGroupDef => !!g)
             : [],

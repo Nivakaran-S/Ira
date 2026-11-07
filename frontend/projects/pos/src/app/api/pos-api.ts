@@ -15,6 +15,10 @@ export interface CatalogProduct {
   parentId?: string | null;
   variantLabel?: string | null;
   modifierGroups?: ModifierGroupDef[];
+  soldByWeight?: boolean;
+  plu?: string | null;
+  tracksBatches?: boolean;
+  rxRequired?: boolean;
 }
 
 export interface ChosenModifier {
@@ -156,7 +160,7 @@ export interface SaleRequest {
   id: string;
   customerId?: string;
   tip?: number;
-  lines: { productId: string; qtyMilli: number; unitPrice?: number; discount?: Discount; note?: string; modifierIds?: string[] }[];
+  lines: { productId: string; qtyMilli: number; unitPrice?: number; discount?: Discount; note?: string; modifierIds?: string[]; prescriptionItemId?: string }[];
   cartDiscount?: Discount;
   payments: { method: PaymentMethodKey; amount: number; tendered?: number; reference?: string }[];
   expectedTotal: number;

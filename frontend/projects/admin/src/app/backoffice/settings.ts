@@ -58,6 +58,31 @@ import { Money } from './money';
               </div>
             </section>
           }
+          @if (has('weighed-items')) {
+            <section class="card stack">
+              <h2>Scale labels</h2>
+              <label class="check"><input type="checkbox" [checked]="v.scaleBarcode.enabled" (change)="patch({ scaleBarcode: { ...v.scaleBarcode, enabled: checked($event) } })" /> Read price or weight from in-store scale labels (EAN-13)</label>
+              <div class="row">
+                <ui-field label="Prefix" for="s-sb-p"><input id="s-sb-p" [value]="v.scaleBarcode.prefix" (change)="patch({ scaleBarcode: { ...v.scaleBarcode, prefix: val($event) } })" style="max-width: 80px" /></ui-field>
+                <ui-field label="PLU digits" for="s-sb-d"><input id="s-sb-d" inputmode="numeric" [value]="v.scaleBarcode.pluDigits" (change)="patch({ scaleBarcode: { ...v.scaleBarcode, pluDigits: +val($event) || 5 } })" style="max-width: 80px" /></ui-field>
+                <ui-field label="Value is" for="s-sb-v">
+                  <select id="s-sb-v" [value]="v.scaleBarcode.valueType" (change)="patch({ scaleBarcode: { ...v.scaleBarcode, valueType: val($event) === 'price' ? 'price' : 'weight' } })">
+                    <option value="weight">Weight (grams)</option>
+                    <option value="price">Price</option>
+                  </select>
+                </ui-field>
+              </div>
+            </section>
+          }
+          @if (has('batch-expiry') || has('prescriptions')) {
+            <section class="card stack">
+              <h2>Pharmacy</h2>
+              <div class="row">
+                <ui-field label="Prescriptions valid for (days)" for="s-rx"><input id="s-rx" inputmode="numeric" [value]="v.pharmacy.rxValidDays" (change)="patch({ pharmacy: { ...v.pharmacy, rxValidDays: +val($event) || 30 } })" style="max-width: 100px" /></ui-field>
+                <ui-field label="Warn about expiry (days)" for="s-exp"><input id="s-exp" inputmode="numeric" [value]="v.pharmacy.expiryWarnDays" (change)="patch({ pharmacy: { ...v.pharmacy, expiryWarnDays: +val($event) || 30 } })" style="max-width: 100px" /></ui-field>
+              </div>
+            </section>
+          }
           <section class="card stack">
             <h2>Offline selling</h2>
             <label class="check"><input type="checkbox" [checked]="v.offline.enabled" (change)="patch({ offline: { ...v.offline, enabled: checked($event) } })" /> Tills keep selling without a connection</label>
@@ -81,6 +106,9 @@ export class Settings {
   protected readonly busy = signal(false);
   private readonly session = inject(BackofficeSession);
   protected readonly loyaltyOn = computed(() => this.session.modules().includes('loyalty'));
+  protected has(module: string) {
+    return this.session.modules().includes(module);
+  }
 
   protected setLoyalty(key: 'earnSpend' | 'pointValue', text: string) {
     const v = this.money.parse(text);

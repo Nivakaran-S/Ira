@@ -31,6 +31,10 @@ export interface Product {
   price: number;
   active: boolean;
   trackStock: boolean;
+  soldByWeight?: boolean;
+  plu?: string | null;
+  tracksBatches?: boolean;
+  rxRequired?: boolean;
 }
 export type ProductInput = Omit<Product, 'id' | 'sku'> & { sku?: string };
 export interface StockRow {

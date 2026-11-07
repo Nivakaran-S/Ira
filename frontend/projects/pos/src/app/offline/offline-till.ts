@@ -44,6 +44,7 @@ export class OfflineTill {
     const { snap, shift, cashier, perms } = this.context();
     const settings = snap.settings;
     if (payments.some((p) => p.method === 'LOYALTY' || p.method === 'STORE_CREDIT')) throw new OfflineRefused('Points and store credit need a connection.');
+    if (this.cart.lines().some((l) => l.product.rxRequired)) throw new OfflineRefused('Prescription medicines can only be sold online.');
     if (!settings.offline.allowCard && payments.some((p) => p.method !== 'CASH')) {
       throw new OfflineRefused('Offline, this business takes cash only.');
     }

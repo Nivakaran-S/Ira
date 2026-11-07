@@ -144,7 +144,7 @@ export async function setUpCatalog(owner: Page, products: { name: string; price:
     await owner.getByTestId('new-product').click();
     const form = owner.getByTestId('product-form');
     await form.getByLabel('Name').fill(p.name);
-    await form.getByLabel('Price').fill(p.price);
+    await form.getByLabel('Price', { exact: true }).fill(p.price);
     if (p.sku) await form.getByLabel('SKU (optional)').fill(p.sku);
     await form.getByLabel('Category').selectOption({ label: 'Everyday' });
     await form.getByLabel('Tax').selectOption({ label: 'Standard' });

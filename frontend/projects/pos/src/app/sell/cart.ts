@@ -12,6 +12,8 @@ export interface CartLine {
   note?: string;
   /** Modifiers chosen; their deltas are part of the list price. */
   modifiers?: ChosenModifier[];
+  /** Prescription item this line dispenses. */
+  prescriptionItemId?: string;
 }
 
 /** Product price plus chosen modifiers: the price before any override. */
@@ -68,7 +70,12 @@ export class Cart {
   }
 
   /** Adds one more of a product: bumps the last plain line for it, or starts a new line. */
-  add(product: CatalogProduct, qtyMilli = 1000, modifiers: ChosenModifier[] = []) {
+  add(product: CatalogProduct, qtyMilli = 1000, modifiers: ChosenModifier[] = [], prescriptionItemId?: string) {
+    if (prescriptionItemId || product.soldByWeight) {
+      // Never merged: each weighing and each dispensing is its own line.
+      this.lines.update((lines) => [...lines, { key: `l${++seq}`, product, qtyMilli, ...(modifiers.length ? { modifiers } : {}), ...(prescriptionItemId ? { prescriptionItemId } : {}) }]);
+      return;
+    }
     const sameMods = (a?: ChosenModifier[]) => (a ?? []).map((m) => m.id).join() === modifiers.map((m) => m.id).join();
     this.lines.update((lines) => {
       const last = lines[lines.length - 1];

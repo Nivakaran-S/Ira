@@ -104,6 +104,18 @@ import { Money } from './money';
             <input id="p-codes" [value]="barcodes()" (input)="barcodes.set(val($event))" />
           </ui-field>
         }
+        @if (has('weighed-items')) {
+          <div class="row">
+            <label class="check"><input type="checkbox" data-testid="sold-by-weight" [checked]="soldByWeight()" (change)="soldByWeight.set(checked($event))" /> Sold by weight (price per kg)</label>
+            <input aria-label="PLU" placeholder="Scale PLU" [value]="plu()" (input)="plu.set(val($event))" style="max-width: 120px" />
+          </div>
+        }
+        @if (has('batch-expiry')) {
+          <label class="check"><input type="checkbox" data-testid="tracks-batches" [checked]="tracksBatches()" (change)="tracksBatches.set(checked($event))" /> Track lots and expiry dates</label>
+        }
+        @if (has('prescriptions')) {
+          <label class="check"><input type="checkbox" data-testid="rx-required" [checked]="rxRequired()" (change)="rxRequired.set(checked($event))" /> Prescription only</label>
+        }
         <label class="check"><input type="checkbox" [checked]="trackStock()" (change)="trackStock.set(checked($event))" /> Track stock</label>
         <label class="check"><input type="checkbox" [checked]="active()" (change)="active.set(checked($event))" /> Sell on tills</label>
         <div><button class="btn primary" type="submit" [disabled]="busy() || !valid()">Save</button></div>
@@ -150,6 +162,13 @@ export class Catalog {
     loader: () => firstValueFrom(this.http.get<{ id: string; name: string }[]>('/api/modifier-groups')),
   });
   protected readonly groupIds = signal<string[]>([]);
+  protected readonly soldByWeight = signal(false);
+  protected readonly plu = signal('');
+  protected readonly tracksBatches = signal(false);
+  protected readonly rxRequired = signal(false);
+  protected has(module: string) {
+    return this.session.modules().includes(module);
+  }
   private readonly http = inject(HttpClient);
   protected toggleGroup(id: string, on: boolean) {
     this.groupIds.update((ids) => (on ? [...ids, id] : ids.filter((x) => x !== id)));
@@ -239,6 +258,10 @@ export class Catalog {
     this.active.set(true);
     this.barcodes.set('');
     this.groupIds.set([]);
+    this.soldByWeight.set(false);
+    this.plu.set('');
+    this.tracksBatches.set(false);
+    this.rxRequired.set(false);
     this.familyEditing.set(false);
     this.errors.set({});
     this.open.set(true);
@@ -254,6 +277,10 @@ export class Catalog {
     this.trackStock.set(p.trackStock);
     this.active.set(p.active);
     this.barcodes.set(this.codes(p));
+    this.soldByWeight.set(!!p.soldByWeight);
+    this.plu.set(p.plu ?? '');
+    this.tracksBatches.set(!!p.tracksBatches);
+    this.rxRequired.set(!!p.rxRequired);
     this.groupIds.set(((p as { modifierGroups?: { groupId: string }[] }).modifierGroups ?? []).map((g) => g.groupId));
     this.familyEditing.set(!!(p as ProductWithCodes).hasVariants);
     this.errors.set({});
@@ -270,6 +297,9 @@ export class Catalog {
       taxGroupId: this.taxGroupId() || null,
       trackStock: this.trackStock(),
       active: this.active(),
+      ...(this.has('weighed-items') ? { soldByWeight: this.soldByWeight(), plu: this.plu().trim() || null } : {}),
+      ...(this.has('batch-expiry') ? { tracksBatches: this.tracksBatches() } : {}),
+      ...(this.has('prescriptions') ? { rxRequired: this.rxRequired() } : {}),
     };
     try {
       const id = this.editingId();
