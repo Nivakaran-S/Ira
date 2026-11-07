@@ -40,6 +40,9 @@ import { ApprovalDialog } from './approval-dialog';
         </div>
         <nav class="tabs">
           <a routerLink="/till" routerLinkActive="active" [routerLinkActiveOptions]="{ exact: true }">Sell</a>
+          @if (has('tables')) {
+            <a routerLink="/till/tables" routerLinkActive="active" data-testid="tab-tables">Tables</a>
+          }
           <a routerLink="/till/sales" routerLinkActive="active" data-testid="tab-sales">Sales</a>
           <a routerLink="/till/refund" routerLinkActive="active" data-testid="tab-refund">Refund</a>
           <a routerLink="/till/shift" routerLinkActive="active" data-testid="tab-shift">Shift</a>
@@ -84,6 +87,10 @@ export class Till implements OnInit {
   ngOnInit() {
     void this.state.load();
     void this.bridge.check();
+  }
+
+  protected has(module: string) {
+    return (this.state.catalog()?.modules ?? []).includes(module);
   }
 
   protected errorText() {

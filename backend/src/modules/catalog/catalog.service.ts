@@ -133,7 +133,7 @@ export class CatalogService {
         },
         orderBy: { name: 'asc' },
         take: 500,
-        include: { barcodes: { select: { code: true } } },
+        include: { barcodes: { select: { code: true } }, modifierGroups: { select: { groupId: true }, orderBy: { position: 'asc' } } },
       }),
     );
   }

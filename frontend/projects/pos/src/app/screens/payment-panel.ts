@@ -1,4 +1,5 @@
 import { ChangeDetectionStrategy, Component, computed, inject, input, output, signal } from '@angular/core';
+import { cashRound } from '@pos/shared';
 import type { PaymentMethodKey } from '@pos/shared';
 import { Cart } from '../sell/cart';
 import { TillState } from '../till-state';
@@ -25,6 +26,15 @@ const LABEL: Record<PaymentMethodKey, string> = { CASH: 'Cash', CARD: 'Card', OT
         <span class="muted">{{ paid().length ? 'Remaining' : 'To pay' }}</span>
         <strong data-testid="due">{{ state.money(remaining()) }}</strong>
       </div>
+      @if (tips()) {
+        <div class="row tip">
+          <span class="muted">Tip</span>
+          @for (p of [5, 10, 15]; track p) {
+            <button type="button" class="btn small" (click)="setTipPct(p)">{{ p }}%</button>
+          }
+          <input aria-label="Tip" inputmode="decimal" data-testid="tip" [value]="tipText()" (input)="tipText.set(val($event))" style="max-width: 120px" />
+        </div>
+      }
 
       @for (p of paid(); track $index) {
         <div class="row-between small"><span>{{ label[p.method] }} {{ p.reference ? '· ' + p.reference : '' }}</span><span>{{ state.money(p.amount) }}</span></div>
@@ -91,7 +101,15 @@ export class PaymentPanel {
   protected readonly state = inject(TillState);
   protected readonly cart = inject(Cart);
   readonly busy = input(false);
-  readonly complete = output<PaymentDraft[]>();
+  /** Offer a tip field (restaurants). */
+  readonly tips = input(false);
+  /** Totals for something other than the cart (an order being paid); defaults to the cart. */
+  readonly total = input<number | null>(null);
+  readonly complete = output<{ payments: PaymentDraft[]; tip: number }>();
+  protected readonly tipText = signal('');
+  protected readonly tip = computed(() => (this.tips() ? (this.state.parse(this.tipText()) ?? 0) : 0));
+  private readonly baseTotal = computed(() => this.total() ?? this.cart.total());
+  private readonly baseCashTotal = computed(() => (this.total() === null ? this.cart.cashDue() : cashRound(this.total()!, this.cart.settings()?.cashRoundingUnit ?? 1)));
 
   /** Points and store credit appear when a customer with a balance is on the sale and the till is online. */
   protected readonly methods = computed<PaymentMethodKey[]>(() => {
@@ -116,7 +134,7 @@ export class PaymentPanel {
 
   private readonly allCash = computed(() => this.method() === 'CASH' && this.paid().every((p) => p.method === 'CASH'));
   /** What the sale costs given the methods in play. */
-  private readonly due = computed(() => (this.allCash() ? this.cart.cashDue() : this.cart.total()));
+  private readonly due = computed(() => (this.allCash() ? this.baseCashTotal() : this.baseTotal()) + this.tip());
   protected readonly remaining = computed(() => Math.max(0, this.due() - this.paid().reduce((s, p) => s + p.amount, 0)));
   private readonly tendered = computed(() => this.state.parse(this.tenderedText()) ?? 0);
   protected readonly change = computed(() => Math.max(0, this.tendered() - this.remaining()));
@@ -160,7 +178,11 @@ export class PaymentPanel {
   }
 
   private nonCashRemaining() {
-    return Math.max(0, this.cart.total() - this.paid().reduce((s, p) => s + p.amount, 0));
+    return Math.max(0, this.baseTotal() + this.tip() - this.paid().reduce((s, p) => s + p.amount, 0));
+  }
+
+  protected setTipPct(p: number) {
+    this.tipText.set(this.state.money(Math.round((this.baseTotal() * p) / 100)));
   }
 
   protected addPart() {
@@ -192,6 +214,6 @@ export class PaymentPanel {
       }
     }
     if (!parts.length) return this.error.set('Nothing to pay.');
-    this.complete.emit(parts);
+    this.complete.emit({ payments: parts, tip: this.tip() });
   }
 }

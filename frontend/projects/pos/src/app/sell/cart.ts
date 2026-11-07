@@ -1,6 +1,6 @@
 import { computed, Injectable, signal } from '@angular/core';
 import { cashRound, type Discount, priceWithPromotions, type PromotionDef, type TenantSettings } from '@pos/shared';
-import type { CatalogProduct, TillCustomer } from '../api/pos-api';
+import type { CatalogProduct, ChosenModifier, TillCustomer } from '../api/pos-api';
 
 export interface CartLine {
   key: string;
@@ -10,7 +10,12 @@ export interface CartLine {
   unitPrice?: number;
   discount?: Discount;
   note?: string;
+  /** Modifiers chosen; their deltas are part of the list price. */
+  modifiers?: ChosenModifier[];
 }
+
+/** Product price plus chosen modifiers: the price before any override. */
+export const listPriceOf = (l: Pick<CartLine, 'product' | 'modifiers'>) => l.product.price + (l.modifiers ?? []).reduce((s, m) => s + m.priceDelta, 0);
 
 let seq = 0;
 
@@ -35,7 +40,7 @@ export class Cart {
         key: l.key,
         productId: l.product.id,
         categoryId: l.product.categoryId,
-        unitPrice: l.unitPrice ?? l.product.price,
+        unitPrice: l.unitPrice ?? listPriceOf(l),
         qtyMilli: l.qtyMilli,
         taxes: l.product.taxes,
         discount: l.discount,
@@ -63,13 +68,17 @@ export class Cart {
   }
 
   /** Adds one more of a product: bumps the last plain line for it, or starts a new line. */
-  add(product: CatalogProduct, qtyMilli = 1000) {
+  add(product: CatalogProduct, qtyMilli = 1000, modifiers: ChosenModifier[] = []) {
+    const sameMods = (a?: ChosenModifier[]) => (a ?? []).map((m) => m.id).join() === modifiers.map((m) => m.id).join();
     this.lines.update((lines) => {
       const last = lines[lines.length - 1];
-      if (last && last.product.id === product.id && !last.discount && last.unitPrice === undefined && !last.note && qtyMilli % 1000 === 0 && last.qtyMilli % 1000 === 0) {
+      if (
+        last && last.product.id === product.id && sameMods(last.modifiers) && !last.discount && last.unitPrice === undefined && !last.note &&
+        qtyMilli % 1000 === 0 && last.qtyMilli % 1000 === 0
+      ) {
         return [...lines.slice(0, -1), { ...last, qtyMilli: last.qtyMilli + qtyMilli }];
       }
-      return [...lines, { key: `l${++seq}`, product, qtyMilli }];
+      return [...lines, { key: `l${++seq}`, product, qtyMilli, ...(modifiers.length ? { modifiers } : {}) }];
     });
   }
 

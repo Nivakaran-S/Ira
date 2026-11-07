@@ -3,6 +3,7 @@ import { Router } from '@angular/router';
 import { ApiError, apiResource, humanMessage, toApiError } from 'ui';
 import { OfflinePinError, type PinUser, PosSession } from '../device/pos-session';
 import { PinVerifiers } from '../offline/pin-verifier';
+import { PosApi } from '../api/pos-api';
 import { isOfflineError, SyncEngine } from '../offline/sync-engine';
 import { PinPad } from './pin-pad';
 
@@ -72,6 +73,7 @@ export class Pin {
   readonly reason = input<string>();
 
   protected readonly sync = inject(SyncEngine);
+  private readonly api = inject(PosApi);
   private readonly verifiers = inject(PinVerifiers);
   /** Online: the API's PIN pad. Offline: staff from the last sync who have signed in on this till before. */
   protected readonly users = apiResource({
@@ -107,12 +109,22 @@ export class Pin {
     this.selected.set(u);
   }
 
+  /** Kitchen staff (kitchen.view without sale.create) go straight to the kitchen display. */
+  private async homeFor() {
+    try {
+      const caps = await this.api.capabilities();
+      return !caps.permissions.includes('sale.create') && caps.permissions.includes('kitchen.view') ? '/kitchen' : '/till';
+    } catch {
+      return '/till';
+    }
+  }
+
   protected async login(u: PinUser, pin: string) {
     this.busy.set(true);
     this.error.set(null);
     try {
-      await this.session.pinLogin(u, pin);
-      await this.router.navigateByUrl('/till');
+      const how = await this.session.pinLogin(u, pin);
+      await this.router.navigateByUrl(how === 'online' ? await this.homeFor() : '/till');
     } catch (e) {
       if (e instanceof OfflinePinError) {
         this.error.set(

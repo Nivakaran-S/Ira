@@ -1,6 +1,6 @@
 import { HttpClient, HttpHeaders } from '@angular/common/http';
 import { inject, Injectable } from '@angular/core';
-import type { Discount, PaymentMethodKey, PromotionDef, ReceiptDoc, TaxRateDef, TenantSettings } from '@pos/shared';
+import type { Discount, ModifierGroupDef, PaymentMethodKey, PromotionDef, ReceiptDoc, TaxRateDef, TenantSettings } from '@pos/shared';
 import { firstValueFrom } from 'rxjs';
 
 export interface CatalogProduct {
@@ -14,6 +14,55 @@ export interface CatalogProduct {
   hasVariants?: boolean;
   parentId?: string | null;
   variantLabel?: string | null;
+  modifierGroups?: ModifierGroupDef[];
+}
+
+export interface ChosenModifier {
+  id: string;
+  name: string;
+  priceDelta: number;
+}
+
+export interface OrderLine {
+  id: string;
+  productId: string;
+  name: string;
+  qtyMilli: number;
+  paidQtyMilli: number;
+  unitPrice: number;
+  modifiers: ChosenModifier[];
+  note: string | null;
+  course: number;
+  status: 'NEW' | 'SENT' | 'PREPARING' | 'READY' | 'SERVED' | 'VOID';
+}
+export interface Order {
+  id: string;
+  tableId: string | null;
+  name: string | null;
+  guests: number | null;
+  status: 'OPEN' | 'CLOSED' | 'CANCELLED';
+  table: { id: string; name: string; area: string | null } | null;
+  lines: OrderLine[];
+}
+export interface OrderSummary {
+  id: string;
+  name: string | null;
+  guests: number | null;
+  createdAt: string;
+  total: number;
+  unsent: number;
+  ready: number;
+}
+export interface Floor {
+  tables: { id: string; name: string; area: string | null; seats: number; order: OrderSummary | null }[];
+  tabs: OrderSummary[];
+}
+export interface KitchenTicket {
+  orderId: string;
+  table: string | null;
+  name: string | null;
+  firstSentAt: string | null;
+  lines: { id: string; name: string; qtyMilli: number; modifiers: ChosenModifier[]; note: string | null; course: number; status: OrderLine['status']; sentAt: string }[];
 }
 export interface CatalogCategory {
   id: string;
@@ -83,6 +132,7 @@ export interface Sale {
   shiftId: string;
   customerId: string | null;
   loyaltyEarned: number;
+  tip: number;
   lines: SaleLine[];
   payments: { id: string; method: PaymentMethodKey; amount: number; tendered: number | null; change: number; reference: string | null }[];
   refunds: { id: string; receiptNo: string; total: number; rounding: number; method: string; createdAt: string }[];
@@ -105,7 +155,8 @@ export interface Refund {
 export interface SaleRequest {
   id: string;
   customerId?: string;
-  lines: { productId: string; qtyMilli: number; unitPrice?: number; discount?: Discount; note?: string }[];
+  tip?: number;
+  lines: { productId: string; qtyMilli: number; unitPrice?: number; discount?: Discount; note?: string; modifierIds?: string[] }[];
   cartDiscount?: Discount;
   payments: { method: PaymentMethodKey; amount: number; tendered?: number; reference?: string }[];
   expectedTotal: number;
@@ -162,6 +213,43 @@ export class PosApi {
   }
   void(saleId: string, reason: string, h?: CallHeaders) {
     return firstValueFrom(this.http.post<Sale>(`/api/pos/sales/${saleId}/void`, { reason }, opts(h)));
+  }
+  floor() {
+    return firstValueFrom(this.http.get<Floor>('/api/pos/floor'));
+  }
+  openOrder(body: { id: string; tableId?: string; name?: string; guests?: number }) {
+    return firstValueFrom(this.http.post<Order>('/api/pos/orders', body));
+  }
+  order(id: string) {
+    return firstValueFrom(this.http.get<Order>(`/api/pos/orders/${id}`));
+  }
+  addOrderLines(id: string, lines: { id: string; productId: string; qtyMilli: number; modifierIds: string[]; note?: string }[]) {
+    return firstValueFrom(this.http.post<Order>(`/api/pos/orders/${id}/lines`, { lines }));
+  }
+  removeOrderLine(id: string, lineId: string, h?: CallHeaders) {
+    return firstValueFrom(this.http.delete<Order>(`/api/pos/orders/${id}/lines/${lineId}`, opts(h)));
+  }
+  sendOrder(id: string) {
+    return firstValueFrom(this.http.post<Order>(`/api/pos/orders/${id}/send`, {}));
+  }
+  cancelOrder(id: string, h?: CallHeaders) {
+    return firstValueFrom(this.http.post<unknown>(`/api/pos/orders/${id}/cancel`, {}, opts(h)));
+  }
+  payOrder(
+    id: string,
+    body: { saleId: string; lines: { orderLineId: string; qtyMilli: number }[]; payments: SaleRequest['payments']; tip: number; expectedTotal: number; customerId?: string },
+    h?: CallHeaders,
+  ) {
+    return firstValueFrom(this.http.post<Sale>(`/api/pos/orders/${id}/pay`, body, opts(h)));
+  }
+  kitchen() {
+    return firstValueFrom(this.http.get<KitchenTicket[]>('/api/pos/kitchen'));
+  }
+  bump(lineId: string, status: 'PREPARING' | 'READY' | 'SERVED') {
+    return firstValueFrom(this.http.post<unknown>(`/api/pos/kitchen/lines/${lineId}`, { status }));
+  }
+  capabilities() {
+    return firstValueFrom(this.http.get<{ modules: string[]; permissions: string[] }>('/api/me/capabilities'));
   }
   customers(q: string) {
     return firstValueFrom(this.http.get<TillCustomer[]>(`/api/pos/customers?q=${encodeURIComponent(q)}`));

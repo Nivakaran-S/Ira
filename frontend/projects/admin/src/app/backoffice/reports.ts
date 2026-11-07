@@ -41,6 +41,7 @@ function range(p: Preset): { from: Date; to: Date } {
           <div class="card"><div class="muted small">Sales</div><div class="kpi">{{ d.sales.count }}</div></div>
           <div class="card"><div class="muted small">Average sale</div><div class="kpi">{{ money.fmt(d.sales.count ? Math.round(d.sales.total / d.sales.count) : 0) }}</div></div>
           <div class="card"><div class="muted small">Refunds</div><div class="kpi">{{ money.fmt(d.refunds.total) }}</div></div>
+          @if (d.sales.tips) { <div class="card"><div class="muted small">Tips (not revenue)</div><div class="kpi">{{ money.fmt(d.sales.tips) }}</div></div> }
         </section>
 
         <section class="card stack">

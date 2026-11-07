@@ -1,4 +1,6 @@
+import { HttpClient } from '@angular/common/http';
 import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@angular/core';
+import { firstValueFrom } from 'rxjs';
 import { apiResource, fieldErrors, humanMessage, toApiError, ToastService, UiBadge, UiDialog, UiEmpty, UiField } from 'ui';
 import { CommerceApi, type Product } from './commerce-api';
 import { type ProductWithCodes, RetailApi } from './retail-api';
@@ -89,6 +91,14 @@ import { Money } from './money';
             </select>
           </ui-field>
         </div>
+        @if (modifiersOn() && !familyEditing()) {
+          <fieldset class="mods">
+            <legend>Modifier groups</legend>
+            @for (g of modGroups.value() ?? []; track g.id) {
+              <label class="check"><input type="checkbox" [attr.data-mod-group]="g.name" [checked]="groupIds().includes(g.id)" (change)="toggleGroup(g.id, checked($event))" /> {{ g.name }}</label>
+            } @empty { <span class="muted small">Create groups under Modifiers first.</span> }
+          </fieldset>
+        }
         @if (barcodesOn() && !familyEditing()) {
           <ui-field label="Barcodes" for="p-codes" hint="Separate several with commas." [error]="errors()['codes']">
             <input id="p-codes" [value]="barcodes()" (input)="barcodes.set(val($event))" />
@@ -123,6 +133,7 @@ import { Money } from './money';
     .num { text-align: right; }
     .dot { width: 12px; height: 12px; border-radius: 50%; display: inline-block; }
     .check { display: flex; gap: var(--s2); align-items: center; }
+    .mods { border: 1px solid var(--border); border-radius: var(--radius); padding: var(--s3); display: grid; gap: 4px; }
     @media (max-width: 900px) { .layout { grid-template-columns: 1fr; } }
   `,
 })
@@ -133,6 +144,16 @@ export class Catalog {
   protected readonly variantsOn = computed(() => this.session.modules().includes('variants'));
   protected readonly barcodesOn = computed(() => this.session.modules().includes('barcodes'));
   protected readonly barcodes = signal('');
+  protected readonly modifiersOn = computed(() => this.session.modules().includes('modifiers'));
+  protected readonly modGroups = apiResource({
+    params: () => (this.modifiersOn() ? true : undefined),
+    loader: () => firstValueFrom(this.http.get<{ id: string; name: string }[]>('/api/modifier-groups')),
+  });
+  protected readonly groupIds = signal<string[]>([]);
+  private readonly http = inject(HttpClient);
+  protected toggleGroup(id: string, on: boolean) {
+    this.groupIds.update((ids) => (on ? [...ids, id] : ids.filter((x) => x !== id)));
+  }
   protected readonly familyEditing = signal(false);
   protected readonly variantsFor = signal<Product | null>(null);
   protected readonly variants = apiResource({ params: () => this.variantsFor()?.id, loader: ({ params }) => this.retail.variants(params) });
@@ -217,6 +238,7 @@ export class Catalog {
     this.trackStock.set(true);
     this.active.set(true);
     this.barcodes.set('');
+    this.groupIds.set([]);
     this.familyEditing.set(false);
     this.errors.set({});
     this.open.set(true);
@@ -232,6 +254,7 @@ export class Catalog {
     this.trackStock.set(p.trackStock);
     this.active.set(p.active);
     this.barcodes.set(this.codes(p));
+    this.groupIds.set(((p as { modifierGroups?: { groupId: string }[] }).modifierGroups ?? []).map((g) => g.groupId));
     this.familyEditing.set(!!(p as ProductWithCodes).hasVariants);
     this.errors.set({});
     this.open.set(true);
@@ -254,6 +277,9 @@ export class Catalog {
       if (this.barcodesOn() && !this.familyEditing()) {
         const codes = this.barcodes().split(',').map((c) => c.trim()).filter(Boolean);
         if (codes.length || id) await this.retail.setBarcodes(saved.id, codes);
+      }
+      if (this.modifiersOn() && !this.familyEditing() && (this.groupIds().length || id)) {
+        await firstValueFrom(this.http.put(`/api/products/${saved.id}/modifier-groups`, { groupIds: this.groupIds() }));
       }
       this.toasts.success(`${input.name} saved`);
       this.open.set(false);

@@ -3,7 +3,7 @@ import { approvalNeeds, buildSaleReceipt, cashRound, type Permission, type Recei
 import { Approvals } from '../api/approvals';
 import { PosSession } from '../device/pos-session';
 import type { PaymentDraft } from '../screens/payment-panel';
-import { Cart } from '../sell/cart';
+import { Cart, listPriceOf } from '../sell/cart';
 import { TillState } from '../till-state';
 import { SyncEngine } from './sync-engine';
 
@@ -40,7 +40,7 @@ export class OfflineTill {
     return { snap, shift, cashier, perms: new Set<string>(this.sync.user(cashier.id)?.permissions ?? []) };
   }
 
-  async sell(payments: PaymentDraft[], id = uuidv7()): Promise<OfflineSaleResult> {
+  async sell(payments: PaymentDraft[], id = uuidv7(), tip = 0): Promise<OfflineSaleResult> {
     const { snap, shift, cashier, perms } = this.context();
     const settings = snap.settings;
     if (payments.some((p) => p.method === 'LOYALTY' || p.method === 'STORE_CREDIT')) throw new OfflineRefused('Points and store credit need a connection.');
@@ -52,8 +52,9 @@ export class OfflineTill {
     const lines = this.cart.lines().map((l) => ({
       productId: l.product.id,
       qtyMilli: l.qtyMilli,
-      unitPrice: l.unitPrice ?? l.product.price,
-      listPrice: l.product.price,
+      unitPrice: l.unitPrice ?? listPriceOf(l),
+      listPrice: listPriceOf(l),
+      ...(l.modifiers?.length ? { modifiers: l.modifiers } : {}),
       taxes: l.product.taxes,
       ...(l.discount ? { discount: l.discount } : {}),
       ...(l.note ? { note: l.note } : {}),
@@ -66,7 +67,7 @@ export class OfflineTill {
     const allCash = payments.every((p) => p.method === 'CASH');
     const due = allCash ? cashRound(priced.totals.total, settings.cashRoundingUnit) : priced.totals.total;
     const paid = payments.reduce((s, p) => s + p.amount, 0);
-    if (paid !== due) throw new OfflineRefused('Payments do not add up to the amount due.');
+    if (paid !== due + tip) throw new OfflineRefused('Payments do not add up to the amount due.');
     const receiptNo = await this.sync.nextReceiptNo();
     await this.sync.enqueue('sale', {
       id,
@@ -79,6 +80,7 @@ export class OfflineTill {
       ...(promos.cart[0] ? { cartPromo: promos.cart[0] } : {}),
       payments: payments.map((p) => ({ method: p.method as 'CASH' | 'CARD' | 'OTHER', amount: p.amount, ...(p.tendered ? { tendered: p.tendered } : {}), ...(p.reference ? { reference: p.reference } : {}) })),
       expectedTotal: due,
+      tip,
       approvals: approvals as { action: Permission; approverId: string }[],
     });
     const change = payments.reduce((s, p) => s + Math.max(0, (p.tendered ?? p.amount) - p.amount), 0);
@@ -98,7 +100,8 @@ export class OfflineTill {
       notice: 'Offline sale',
       pricesIncludeTax: settings.pricesIncludeTax,
       lines: this.cart.lines().map((l, i) => ({
-        name: l.product.name, qtyMilli: l.qtyMilli, unitPrice: l.unitPrice ?? l.product.price, net: priced.lines[i].net, discount: priced.lines[i].discount, note: l.note,
+        name: l.product.name, qtyMilli: l.qtyMilli, unitPrice: l.unitPrice ?? listPriceOf(l), net: priced.lines[i].net, discount: priced.lines[i].discount,
+        note: [(l.modifiers ?? []).map((m) => m.name).join(', '), l.note].filter(Boolean).join(' / ') || undefined,
       })),
       subtotal: priced.totals.subtotal,
       discountTotal: priced.totals.discountTotal,
@@ -109,6 +112,7 @@ export class OfflineTill {
       taxes: priced.taxes,
       payments,
       promotions: this.cart.promoTotals(),
+      tip,
     });
     return { id, receiptNo, due, change, receipt };
   }

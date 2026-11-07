@@ -88,7 +88,7 @@ export interface ShiftReport {
 export interface SalesSummary {
   currency: string;
   range: { from: string; to: string; timezone: string };
-  sales: { count: number; subtotal: number; discountTotal: number; taxTotal: number; total: number };
+  sales: { count: number; subtotal: number; discountTotal: number; taxTotal: number; total: number; tips?: number };
   voids: { count: number; total: number };
   refunds: { count: number; total: number };
   net: number;

@@ -19,7 +19,10 @@ export const routes: Routes = [
       { path: 'sales', title: 'Sales', loadComponent: () => import('./screens/sales-history').then((m) => m.SalesHistory) },
       { path: 'refund', title: 'Refund', loadComponent: () => import('./screens/refund').then((m) => m.Refund) },
       { path: 'shift', title: 'Shift', loadComponent: () => import('./screens/shift').then((m) => m.Shift) },
+      { path: 'tables', title: 'Tables', loadComponent: () => import('./screens/floor').then((m) => m.FloorScreen) },
+      { path: 'orders/:id', title: 'Order', loadComponent: () => import('./screens/order').then((m) => m.OrderScreen) },
     ],
   },
+  { path: 'kitchen', title: 'Kitchen', canActivate: [enrolled, cashier], loadComponent: () => import('./screens/kitchen').then((m) => m.KitchenScreen) },
   { path: '**', redirectTo: 'till' },
 ];

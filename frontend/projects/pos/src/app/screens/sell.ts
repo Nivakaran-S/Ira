@@ -1,5 +1,6 @@
 import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@angular/core';
 import { CustomerPicker } from './customer-picker';
+import { ModifierPicker } from './modifier-picker';
 import { type Discount, type ReceiptDoc, uuidv7 } from '@pos/shared';
 import { humanMessage, toApiError, ToastService, UiDialog } from 'ui';
 import { ApprovalCancelled, Approvals } from '../api/approvals';
@@ -7,7 +8,7 @@ import { type CatalogProduct, PosApi, type TillCustomer } from '../api/pos-api';
 import { OfflineRefused, OfflineTill } from '../offline/offline-till';
 import { isOfflineError } from '../offline/sync-engine';
 import { HardwareBridge } from '../hardware/bridge';
-import { Cart, type CartLine } from '../sell/cart';
+import { Cart, type CartLine, listPriceOf } from '../sell/cart';
 import { TillState } from '../till-state';
 import { OpenShift } from './open-shift';
 import { PaymentPanel, type PaymentDraft } from './payment-panel';
@@ -17,7 +18,7 @@ import { ReceiptView } from './receipt-view';
   selector: 'pos-sell',
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: { '(window:keydown)': 'onKey($event)' },
-  imports: [UiDialog, OpenShift, PaymentPanel, ReceiptView, CustomerPicker],
+  imports: [UiDialog, OpenShift, PaymentPanel, ReceiptView, CustomerPicker, ModifierPicker],
   template: `
     @if (!state.loaded()) {
       <p class="muted pad">Loading the till…</p>
@@ -63,7 +64,8 @@ import { ReceiptView } from './receipt-view';
               <button type="button" class="line" [class.sel]="editing()?.key === l.key" (click)="edit(l)">
                 <div class="l1"><span>{{ l.product.name }}</span><span>{{ state.money(cart.pricedLine(l.key)?.net ?? 0) }}</span></div>
                 <div class="l2 muted small">
-                  {{ state.qty(l.qtyMilli) }} × {{ state.money(l.unitPrice ?? l.product.price) }}
+                  @if (l.modifiers?.length) { <div data-testid="line-modifiers">{{ modText(l) }}</div> }
+                  {{ state.qty(l.qtyMilli) }} × {{ state.money(l.unitPrice ?? listPrice(l)) }}
                   @if (l.unitPrice !== undefined) { <span class="tag">price changed</span> }
                   @if (cart.pricedLine(l.key)?.discount) { <span class="tag">−{{ state.money(cart.pricedLine(l.key)!.discount) }}</span> }
                   @if (cart.promoLabel(l.key); as promo) { <span class="promo" data-testid="line-promo">{{ promo }}</span> }
@@ -103,7 +105,7 @@ import { ReceiptView } from './receipt-view';
           </div>
           <div class="row">
             <label class="grow">Discount %<input inputmode="decimal" [value]="pctOf(l.discount)" (change)="setLineDiscount(l, val($event))" /></label>
-            <label class="grow">Price<input inputmode="decimal" [value]="state.money(l.unitPrice ?? l.product.price)" (change)="setPrice(l, val($event))" /></label>
+            <label class="grow">Price<input inputmode="decimal" [value]="state.money(l.unitPrice ?? listPrice(l))" (change)="setPrice(l, val($event))" /></label>
           </div>
           <label>Note<input [value]="l.note ?? ''" (change)="cart.update(l.key, { note: val($event) || undefined })" /></label>
           <div class="row-between">
@@ -124,6 +126,12 @@ import { ReceiptView } from './receipt-view';
             </button>
           }
         </div>
+      }
+    </ui-dialog>
+
+    <ui-dialog [title]="modifying()?.name ?? ''" [open]="!!modifying()" (closed)="modifying.set(null)">
+      @if (modifying(); as p) {
+        <pos-modifier-picker [product]="p" (chosen)="cart.add(p, 1000, $event); modifying.set(null)" />
       }
     </ui-dialog>
 
@@ -150,7 +158,7 @@ import { ReceiptView } from './receipt-view';
 
     <ui-dialog title="Payment" [open]="paying()" (closed)="paying.set(false)">
       @if (paying()) {
-        <pos-payment-panel [busy]="busy()" (complete)="complete($event)" />
+        <pos-payment-panel [busy]="busy()" [tips]="tipsOn()" (complete)="complete($event.payments, $event.tip)" />
       }
     </ui-dialog>
 
@@ -231,6 +239,12 @@ export class Sell {
   protected readonly busy = signal(false);
   protected readonly done = signal<{ receiptNo: string; change: number; receipt: ReceiptDoc | null; offline: boolean } | null>(null);
   protected readonly picking = signal<CatalogProduct | null>(null);
+  protected readonly modifying = signal<CatalogProduct | null>(null);
+  protected readonly tipsOn = computed(() => (this.state.catalog()?.modules ?? []).includes('tables'));
+  protected readonly listPrice = listPriceOf;
+  protected modText(l: CartLine) {
+    return (l.modifiers ?? []).map((m) => m.name).join(', ');
+  }
   protected readonly customerOpen = signal(false);
   protected readonly customersOn = computed(() => (this.state.catalog()?.modules ?? []).includes('customers'));
   protected readonly manualDiscount = computed(() => this.cart.priced().totals.discountTotal - this.cart.promoTotals().reduce((s, p) => s + p.amount, 0));
@@ -298,6 +312,7 @@ export class Sell {
 
   protected add(p: CatalogProduct) {
     if (p.hasVariants) this.picking.set(p);
+    else if (p.modifierGroups?.length) this.modifying.set(p);
     else this.cart.add(p);
   }
 
@@ -347,7 +362,7 @@ export class Sell {
   protected setPrice(l: CartLine, text: string) {
     const v = this.state.parse(text);
     if (v === null) return;
-    this.cart.update(l.key, { unitPrice: v === l.product.price ? undefined : v });
+    this.cart.update(l.key, { unitPrice: v === listPriceOf(l) ? undefined : v });
     this.refreshEditing(l.key);
   }
 
@@ -361,21 +376,21 @@ export class Sell {
     if (v && v > 0) this.setCartDiscount({ kind: 'amount', amount: v });
   }
 
-  protected async complete(payments: PaymentDraft[]) {
+  protected async complete(payments: PaymentDraft[], tip = 0) {
     if (this.busy()) return;
     this.busy.set(true);
     // One id for this sale whichever way it goes: if an online attempt did reach the server, the
     // offline copy syncs as a duplicate instead of a second sale.
     const id = uuidv7();
     try {
-      if (this.state.offline()) await this.completeOffline(payments, id);
+      if (this.state.offline()) await this.completeOffline(payments, id, tip);
       else {
         try {
-          await this.completeOnline(payments, id);
+          await this.completeOnline(payments, id, tip);
         } catch (e) {
           if (!isOfflineError(e)) throw e;
           this.state.sync.online.set(false);
-          await this.completeOffline(payments, id);
+          await this.completeOffline(payments, id, tip);
         }
       }
     } catch (e) {
@@ -386,17 +401,19 @@ export class Sell {
     }
   }
 
-  private async completeOnline(payments: PaymentDraft[], id: string) {
+  private async completeOnline(payments: PaymentDraft[], id: string, tip: number) {
     const allCash = payments.every((p) => p.method === 'CASH');
     const body = {
       id,
       ...(this.cart.customer() ? { customerId: this.cart.customer()!.id } : {}),
+      ...(tip ? { tip } : {}),
       lines: this.cart.lines().map((l) => ({
         productId: l.product.id,
         qtyMilli: l.qtyMilli,
         ...(l.unitPrice !== undefined ? { unitPrice: l.unitPrice } : {}),
         ...(l.discount ? { discount: l.discount } : {}),
         ...(l.note ? { note: l.note } : {}),
+        ...(l.modifiers?.length ? { modifierIds: l.modifiers.map((m) => m.id) } : {}),
       })),
       ...(this.cart.cartDiscount() ? { cartDiscount: this.cart.cartDiscount()! } : {}),
       payments: payments.map((p) => ({ method: p.method, amount: p.amount, ...(p.tendered ? { tendered: p.tendered } : {}), ...(p.reference ? { reference: p.reference } : {}) })),
@@ -412,9 +429,9 @@ export class Sell {
     void this.state.refreshShift();
   }
 
-  private async completeOffline(payments: PaymentDraft[], id: string) {
+  private async completeOffline(payments: PaymentDraft[], id: string, tip: number) {
     if (this.cart.customer()) throw new OfflineRefused('Customers, points and store credit need a connection. Remove the customer to sell offline.');
-    const r = await this.offlineTill.sell(payments, id);
+    const r = await this.offlineTill.sell(payments, id, tip);
     this.cart.clear();
     this.paying.set(false);
     this.done.set({ receiptNo: r.receiptNo, change: r.change, receipt: r.receipt, offline: true });

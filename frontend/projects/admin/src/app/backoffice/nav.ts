@@ -17,6 +17,8 @@ const ITEMS: NavItem[] = [
   { path: '/stock', label: 'Stock', anyOf: ['stock.adjust'] },
   { path: '/customers', label: 'Customers', anyOf: ['customer.manage'], module: 'customers' },
   { path: '/promotions', label: 'Promotions', anyOf: ['promotion.manage'], module: 'promotions' },
+  { path: '/modifiers', label: 'Modifiers', anyOf: ['catalog.manage'], module: 'modifiers' },
+  { path: '/tables', label: 'Tables', anyOf: ['table.manage'], module: 'tables' },
   { path: '/stores', label: 'Stores', anyOf: ['store.manage'] },
   { path: '/registers', label: 'Registers', anyOf: ['register.manage'] },
   { path: '/roles', label: 'Roles', anyOf: ['role.manage'] },

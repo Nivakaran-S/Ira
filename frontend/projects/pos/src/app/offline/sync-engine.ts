@@ -1,6 +1,6 @@
 import { HttpClient, HttpErrorResponse } from '@angular/common/http';
 import { computed, inject, Injectable, signal } from '@angular/core';
-import { GENESIS, type OfflineOp, type OfflineOpKind, offlineReceiptNo, opHash, type PromotionDef, type SyncResult, type TaxRateDef, type TenantSettings } from '@pos/shared';
+import { GENESIS, type ModifierGroupDef, type OfflineOp, type OfflineOpKind, offlineReceiptNo, opHash, type PromotionDef, type SyncResult, type TaxRateDef, type TenantSettings } from '@pos/shared';
 import { firstValueFrom } from 'rxjs';
 import { ApiError, ToastService } from 'ui';
 import type { CatalogCategory, CatalogProduct, PosCatalog, ShiftReport } from '../api/pos-api';
@@ -25,6 +25,7 @@ interface SnapProduct {
   hasVariants?: boolean;
   parentId?: string | null;
   variantLabel?: string | null;
+  modifierGroupIds?: string[];
 }
 export interface Snapshot {
   cursor: string;
@@ -42,6 +43,7 @@ export interface Snapshot {
   /** Barcode → product id. */
   barcodes: Record<string, string>;
   promotions: Record<string, PromotionDef>;
+  modifierGroups: Record<string, ModifierGroupDef>;
 }
 interface SyncState {
   lastContactAt: number | null;
@@ -65,6 +67,7 @@ interface DownResponse {
   modules: string[];
   barcodes: { code: string; productId: string }[];
   promotions: PromotionDef[];
+  modifierGroups?: ModifierGroupDef[];
 }
 
 const SYNC_EVERY_MS = 15_000;
@@ -114,6 +117,9 @@ export class SyncEngine {
           id: p.id, name: p.name, sku: p.sku, price: p.price, categoryId: p.categoryId, trackStock: p.trackStock,
           taxes: p.taxGroupId ? (s.taxGroups[p.taxGroupId]?.rates ?? []) : [],
           hasVariants: !!p.hasVariants, parentId: p.parentId ?? null, variantLabel: p.variantLabel ?? null,
+          modifierGroups: (s.modules ?? []).includes('modifiers')
+            ? (p.modifierGroupIds ?? []).map((id) => s.modifierGroups?.[id]).filter((g): g is ModifierGroupDef => !!g)
+            : [],
         })) satisfies CatalogProduct[],
       modules: s.modules ?? [],
       promotions: (s.modules ?? []).includes('promotions') ? Object.values(s.promotions ?? {}).filter((p) => p.active) : [],
@@ -204,9 +210,9 @@ export class SyncEngine {
     const base: Snapshot = r.full || !s
       ? {
           cursor: '0', currency: r.currency, timezone: r.timezone, tenantName: r.tenantName, settings: r.settings, register: r.register,
-          users: [], categories: {}, products: {}, taxGroups: {}, shift: null, modules: [], barcodes: {}, promotions: {},
+          users: [], categories: {}, products: {}, taxGroups: {}, shift: null, modules: [], barcodes: {}, promotions: {}, modifierGroups: {},
         }
-      : { ...s, barcodes: s.barcodes ?? {}, promotions: s.promotions ?? {}, modules: s.modules ?? [] };
+      : { ...s, barcodes: s.barcodes ?? {}, promotions: s.promotions ?? {}, modules: s.modules ?? [], modifierGroups: s.modifierGroups ?? {} };
     // A product in the delta brings its complete list of codes: drop what it had, then add.
     const touched = new Set(r.products.map((p) => p.id));
     const barcodes = Object.fromEntries(Object.entries(base.barcodes).filter(([, pid]) => !touched.has(pid)));
@@ -227,6 +233,7 @@ export class SyncEngine {
       modules: r.modules ?? [],
       barcodes,
       promotions: { ...base.promotions, ...Object.fromEntries((r.promotions ?? []).map((p) => [p.id, p])) },
+      modifierGroups: { ...base.modifierGroups, ...Object.fromEntries((r.modifierGroups ?? []).map((g) => [g.id, g])) },
     };
     await this.db.put('kv', 'snapshot', next);
     this.snapshot.set(next);
