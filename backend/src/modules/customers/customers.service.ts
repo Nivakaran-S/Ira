@@ -132,13 +132,13 @@ export class CustomersService {
     return this.tenantDb.run(tenant.id, async (tx) => {
       const r = await tx.customer.findUnique({ where: { id } });
       if (!r) throw AppError.notFound('Customer not found');
-      const [balances, sales, loyalty, credit] = await Promise.all([
+      const [balances, sales, loyaltyLedger, creditLedger] = await Promise.all([
         this.balances(tx, id),
         tx.sale.findMany({ where: { customerId: id }, orderBy: { soldAt: 'desc' }, take: 50, select: { id: true, receiptNo: true, due: true, status: true, soldAt: true, loyaltyEarned: true } }),
         tx.loyaltyLedger.findMany({ where: { customerId: id }, orderBy: { createdAt: 'desc' }, take: 50 }),
         tx.storeCreditLedger.findMany({ where: { customerId: id }, orderBy: { createdAt: 'desc' }, take: 50 }),
       ]);
-      return { customer: this.view(r), ...balances, sales, loyalty, credit };
+      return { customer: this.view(r), ...balances, sales, loyaltyLedger, creditLedger };
     });
   }
 

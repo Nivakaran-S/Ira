@@ -43,10 +43,12 @@ export class OfflineTill {
   async sell(payments: PaymentDraft[], id = uuidv7()): Promise<OfflineSaleResult> {
     const { snap, shift, cashier, perms } = this.context();
     const settings = snap.settings;
+    if (payments.some((p) => p.method === 'LOYALTY' || p.method === 'STORE_CREDIT')) throw new OfflineRefused('Points and store credit need a connection.');
     if (!settings.offline.allowCard && payments.some((p) => p.method !== 'CASH')) {
       throw new OfflineRefused('Offline, this business takes cash only.');
     }
     const priced = this.cart.priced();
+    const promos = this.cart.promos();
     const lines = this.cart.lines().map((l) => ({
       productId: l.product.id,
       qtyMilli: l.qtyMilli,
@@ -55,6 +57,7 @@ export class OfflineTill {
       taxes: l.product.taxes,
       ...(l.discount ? { discount: l.discount } : {}),
       ...(l.note ? { note: l.note } : {}),
+      ...(promos.lines[l.key]?.[0] ? { promo: promos.lines[l.key][0] } : {}),
     }));
     const cartDiscount = this.cart.cartDiscount() ?? undefined;
     const needs = approvalNeeds(perms, settings, lines, cartDiscount, priced);
@@ -73,7 +76,8 @@ export class OfflineTill {
       catalogVersion: snap.cursor,
       lines,
       ...(cartDiscount ? { cartDiscount } : {}),
-      payments: payments.map((p) => ({ method: p.method, amount: p.amount, ...(p.tendered ? { tendered: p.tendered } : {}), ...(p.reference ? { reference: p.reference } : {}) })),
+      ...(promos.cart[0] ? { cartPromo: promos.cart[0] } : {}),
+      payments: payments.map((p) => ({ method: p.method as 'CASH' | 'CARD' | 'OTHER', amount: p.amount, ...(p.tendered ? { tendered: p.tendered } : {}), ...(p.reference ? { reference: p.reference } : {}) })),
       expectedTotal: due,
       approvals: approvals as { action: Permission; approverId: string }[],
     });
@@ -104,6 +108,7 @@ export class OfflineTill {
       change,
       taxes: priced.taxes,
       payments,
+      promotions: this.cart.promoTotals(),
     });
     return { id, receiptNo, due, change, receipt };
   }

@@ -1,6 +1,6 @@
 import { ChangeDetectionStrategy, Component, inject, input, signal, viewChild } from '@angular/core';
 import { Router } from '@angular/router';
-import { apiResource, humanMessage, toApiError } from 'ui';
+import { ApiError, apiResource, humanMessage, toApiError } from 'ui';
 import { OfflinePinError, type PinUser, PosSession } from '../device/pos-session';
 import { PinVerifiers } from '../offline/pin-verifier';
 import { isOfflineError, SyncEngine } from '../offline/sync-engine';
@@ -123,6 +123,7 @@ export class Pin {
         this.pad()?.clear();
         return;
       }
+      if (!(e instanceof ApiError)) console.error('Sign-in failed', e);
       const err = toApiError(e);
       this.error.set(err.code === 'UNAUTHENTICATED' ? 'Wrong PIN. Try again.' : humanMessage(err));
       this.pad()?.clear();

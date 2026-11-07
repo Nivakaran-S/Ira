@@ -60,6 +60,7 @@ import { TillState } from '../till-state';
                   <option value="CASH">Cash</option>
                   <option value="CARD">Card</option>
                   <option value="OTHER">Other</option>
+                  @if (s.customerId) { <option value="STORE_CREDIT">Store credit</option> }
                 </select>
               </label>
               <label class="grow">Reason<input data-testid="refund-reason" [value]="reason()" (input)="reason.set(val($event))" /></label>
@@ -116,7 +117,8 @@ export class Refund {
     try {
       const s = await this.api.lookup(this.receiptNo().trim().toUpperCase());
       this.sale.set(s);
-      this.method.set(s.payments[0]?.method ?? 'CASH');
+      const first = s.payments[0]?.method ?? 'CASH';
+      this.method.set(first === 'LOYALTY' ? 'CASH' : first);
     } catch (e) {
       this.error.set(humanMessage(toApiError(e)));
     }

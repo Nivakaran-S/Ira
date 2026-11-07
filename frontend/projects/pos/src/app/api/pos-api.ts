@@ -1,6 +1,6 @@
 import { HttpClient, HttpHeaders } from '@angular/common/http';
 import { inject, Injectable } from '@angular/core';
-import type { Discount, PaymentMethodKey, ReceiptDoc, TaxRateDef, TenantSettings } from '@pos/shared';
+import type { Discount, PaymentMethodKey, PromotionDef, ReceiptDoc, TaxRateDef, TenantSettings } from '@pos/shared';
 import { firstValueFrom } from 'rxjs';
 
 export interface CatalogProduct {
@@ -11,6 +11,9 @@ export interface CatalogProduct {
   categoryId: string | null;
   trackStock: boolean;
   taxes: TaxRateDef[];
+  hasVariants?: boolean;
+  parentId?: string | null;
+  variantLabel?: string | null;
 }
 export interface CatalogCategory {
   id: string;
@@ -22,6 +25,18 @@ export interface PosCatalog {
   settings: TenantSettings;
   categories: CatalogCategory[];
   products: CatalogProduct[];
+  modules?: string[];
+  promotions?: PromotionDef[];
+  /** Barcode → product id. */
+  barcodes?: Record<string, string>;
+}
+
+export interface TillCustomer {
+  id: string;
+  name: string;
+  phoneLast4: string | null;
+  points: number;
+  credit: number;
 }
 
 export interface ShiftReport {
@@ -66,6 +81,8 @@ export interface Sale {
   change: number;
   soldAt: string;
   shiftId: string;
+  customerId: string | null;
+  loyaltyEarned: number;
   lines: SaleLine[];
   payments: { id: string; method: PaymentMethodKey; amount: number; tendered: number | null; change: number; reference: string | null }[];
   refunds: { id: string; receiptNo: string; total: number; rounding: number; method: string; createdAt: string }[];
@@ -87,6 +104,7 @@ export interface Refund {
 
 export interface SaleRequest {
   id: string;
+  customerId?: string;
   lines: { productId: string; qtyMilli: number; unitPrice?: number; discount?: Discount; note?: string }[];
   cartDiscount?: Discount;
   payments: { method: PaymentMethodKey; amount: number; tendered?: number; reference?: string }[];
@@ -144,6 +162,12 @@ export class PosApi {
   }
   void(saleId: string, reason: string, h?: CallHeaders) {
     return firstValueFrom(this.http.post<Sale>(`/api/pos/sales/${saleId}/void`, { reason }, opts(h)));
+  }
+  customers(q: string) {
+    return firstValueFrom(this.http.get<TillCustomer[]>(`/api/pos/customers?q=${encodeURIComponent(q)}`));
+  }
+  createCustomer(input: { name: string; phone?: string }) {
+    return firstValueFrom(this.http.post<TillCustomer>('/api/pos/customers', input));
   }
   refund(body: { id: string; saleId: string; lines: { saleLineId: string; qtyMilli: number }[]; method: PaymentMethodKey; reason: string; restock: boolean }, h?: CallHeaders) {
     return firstValueFrom(this.http.post<Refund>('/api/pos/refunds', body, opts(h)));

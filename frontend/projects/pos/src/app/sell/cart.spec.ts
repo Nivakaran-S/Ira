@@ -55,4 +55,14 @@ describe('Cart', () => {
     c.add(tea);
     expect(c.lines()).toHaveLength(2);
   });
+
+  it('applies promotions from the catalog and labels them', () => {
+    const c = cart();
+    c.promotions.set([{ id: 'p', name: 'Tea 10%', kind: 'PERCENT_OFF', percentBp: 1_000, productIds: ['p1'], categoryIds: [], active: true, startsAt: null, endsAt: null }]);
+    c.add(tea);
+    expect(c.total()).toBe(900);
+    expect(c.promoLabel(c.lines()[0].key)).toBe('Tea 10%');
+    expect(c.promoTotals()).toEqual([{ label: 'Tea 10%', amount: 100 }]);
+    c.promotions.set([]);
+  });
 });

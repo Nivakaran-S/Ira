@@ -1,6 +1,6 @@
 import { HttpClient, HttpErrorResponse } from '@angular/common/http';
 import { computed, inject, Injectable, signal } from '@angular/core';
-import { GENESIS, type OfflineOp, type OfflineOpKind, offlineReceiptNo, opHash, type SyncResult, type TaxRateDef, type TenantSettings } from '@pos/shared';
+import { GENESIS, type OfflineOp, type OfflineOpKind, offlineReceiptNo, opHash, type PromotionDef, type SyncResult, type TaxRateDef, type TenantSettings } from '@pos/shared';
 import { firstValueFrom } from 'rxjs';
 import { ApiError, ToastService } from 'ui';
 import type { CatalogCategory, CatalogProduct, PosCatalog, ShiftReport } from '../api/pos-api';
@@ -22,6 +22,9 @@ interface SnapProduct {
   taxGroupId: string | null;
   active: boolean;
   trackStock: boolean;
+  hasVariants?: boolean;
+  parentId?: string | null;
+  variantLabel?: string | null;
 }
 export interface Snapshot {
   cursor: string;
@@ -35,6 +38,10 @@ export interface Snapshot {
   products: Record<string, SnapProduct>;
   taxGroups: Record<string, { id: string; name: string; rates: TaxRateDef[] }>;
   shift: ShiftReport | null;
+  modules: string[];
+  /** Barcode → product id. */
+  barcodes: Record<string, string>;
+  promotions: Record<string, PromotionDef>;
 }
 interface SyncState {
   lastContactAt: number | null;
@@ -55,6 +62,9 @@ interface DownResponse {
   categories: (CatalogCategory & { sortOrder: number })[];
   products: SnapProduct[];
   taxGroups: { id: string; name: string; rates: TaxRateDef[] }[];
+  modules: string[];
+  barcodes: { code: string; productId: string }[];
+  promotions: PromotionDef[];
 }
 
 const SYNC_EVERY_MS = 15_000;
@@ -103,7 +113,11 @@ export class SyncEngine {
         .map((p) => ({
           id: p.id, name: p.name, sku: p.sku, price: p.price, categoryId: p.categoryId, trackStock: p.trackStock,
           taxes: p.taxGroupId ? (s.taxGroups[p.taxGroupId]?.rates ?? []) : [],
+          hasVariants: !!p.hasVariants, parentId: p.parentId ?? null, variantLabel: p.variantLabel ?? null,
         })) satisfies CatalogProduct[],
+      modules: s.modules ?? [],
+      promotions: (s.modules ?? []).includes('promotions') ? Object.values(s.promotions ?? {}).filter((p) => p.active) : [],
+      barcodes: s.barcodes ?? {},
     };
   });
 
@@ -188,8 +202,15 @@ export class SyncEngine {
       this.http.get<DownResponse>(`/api/pos/sync/down?cursor=${cursor}${blockNext !== undefined ? `&blockNext=${blockNext}` : ''}`),
     );
     const base: Snapshot = r.full || !s
-      ? { cursor: '0', currency: r.currency, timezone: r.timezone, tenantName: r.tenantName, settings: r.settings, register: r.register, users: [], categories: {}, products: {}, taxGroups: {}, shift: null }
-      : s;
+      ? {
+          cursor: '0', currency: r.currency, timezone: r.timezone, tenantName: r.tenantName, settings: r.settings, register: r.register,
+          users: [], categories: {}, products: {}, taxGroups: {}, shift: null, modules: [], barcodes: {}, promotions: {},
+        }
+      : { ...s, barcodes: s.barcodes ?? {}, promotions: s.promotions ?? {}, modules: s.modules ?? [] };
+    // A product in the delta brings its complete list of codes: drop what it had, then add.
+    const touched = new Set(r.products.map((p) => p.id));
+    const barcodes = Object.fromEntries(Object.entries(base.barcodes).filter(([, pid]) => !touched.has(pid)));
+    for (const b of r.barcodes ?? []) barcodes[b.code] = b.productId;
     const next: Snapshot = {
       ...base,
       cursor: r.cursor,
@@ -203,6 +224,9 @@ export class SyncEngine {
       categories: { ...base.categories, ...Object.fromEntries(r.categories.map((c) => [c.id, c])) },
       products: { ...base.products, ...Object.fromEntries(r.products.map((p) => [p.id, p])) },
       taxGroups: { ...base.taxGroups, ...Object.fromEntries(r.taxGroups.map((g) => [g.id, g])) },
+      modules: r.modules ?? [],
+      barcodes,
+      promotions: { ...base.promotions, ...Object.fromEntries((r.promotions ?? []).map((p) => [p.id, p])) },
     };
     await this.db.put('kv', 'snapshot', next);
     this.snapshot.set(next);

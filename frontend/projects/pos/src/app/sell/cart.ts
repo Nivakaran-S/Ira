@@ -1,6 +1,6 @@
 import { computed, Injectable, signal } from '@angular/core';
-import { cashRound, type Discount, priceSale, type TenantSettings } from '@pos/shared';
-import type { CatalogProduct } from '../api/pos-api';
+import { cashRound, type Discount, priceWithPromotions, type PromotionDef, type TenantSettings } from '@pos/shared';
+import type { CatalogProduct, TillCustomer } from '../api/pos-api';
 
 export interface CartLine {
   key: string;
@@ -14,29 +14,48 @@ export interface CartLine {
 
 let seq = 0;
 
-/** The sale being rung up. Totals come from the same engine the API re-runs, so they always agree. */
+/**
+ * The sale being rung up. Totals come from the same engines the API re-runs (promotions, then
+ * pricing), so the till and the server always agree.
+ */
 @Injectable({ providedIn: 'root' })
 export class Cart {
   readonly lines = signal<CartLine[]>([]);
   readonly cartDiscount = signal<Discount | null>(null);
   readonly settings = signal<TenantSettings | null>(null);
+  readonly promotions = signal<PromotionDef[]>([]);
+  readonly customer = signal<TillCustomer | null>(null);
+  /** Re-evaluated when the cart changes, so promotions that start or end mid-sale apply on the next change. */
+  private readonly now = computed(() => (this.lines(), new Date()));
 
-  readonly priced = computed(() =>
-    priceSale({
+  readonly result = computed(() =>
+    priceWithPromotions({
       pricesIncludeTax: this.settings()?.pricesIncludeTax ?? true,
       lines: this.lines().map((l) => ({
         key: l.key,
+        productId: l.product.id,
+        categoryId: l.product.categoryId,
         unitPrice: l.unitPrice ?? l.product.price,
         qtyMilli: l.qtyMilli,
         taxes: l.product.taxes,
-        discounts: l.discount ? [l.discount] : [],
+        discount: l.discount,
       })),
-      cartDiscounts: this.cartDiscount() ? [this.cartDiscount()!] : [],
+      cartDiscount: this.cartDiscount() ?? undefined,
+      promotions: this.promotions(),
+      now: this.now(),
     }),
   );
+  readonly priced = computed(() => this.result().priced);
+  readonly promos = computed(() => this.result().promos);
   readonly total = computed(() => this.priced().totals.total);
   readonly count = computed(() => this.lines().reduce((s, l) => s + l.qtyMilli, 0) / 1000);
   readonly empty = computed(() => this.lines().length === 0);
+  /** Promotion savings by name, for the totals panel and offline receipts. */
+  readonly promoTotals = computed(() => {
+    const m = new Map<string, number>();
+    for (const l of this.priced().lines) for (const p of l.parts) if (p.source === 'promo' && p.label) m.set(p.label, (m.get(p.label) ?? 0) + p.amount);
+    return [...m].map(([label, amount]) => ({ label, amount }));
+  });
 
   /** What is due if everything is paid in cash (tenant cash rounding applies). */
   cashDue(): number {
@@ -70,10 +89,14 @@ export class Cart {
   clear() {
     this.lines.set([]);
     this.cartDiscount.set(null);
+    this.customer.set(null);
   }
 
-  /** Line i of the priced result for a cart line. */
   pricedLine(key: string) {
     return this.priced().lines.find((l) => l.key === key);
+  }
+
+  promoLabel(key: string) {
+    return this.promos().lines[key]?.[0]?.label ?? null;
   }
 }

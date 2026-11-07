@@ -3,6 +3,8 @@ export interface NavItem {
   label: string;
   /** Shown when the user holds any of these; empty = always. UX only: the API enforces. */
   anyOf: string[];
+  /** Shown only when this module is on for the tenant. */
+  module?: string;
 }
 
 const ITEMS: NavItem[] = [
@@ -13,6 +15,8 @@ const ITEMS: NavItem[] = [
   { path: '/catalog', label: 'Catalog', anyOf: ['catalog.manage'] },
   { path: '/taxes', label: 'Taxes', anyOf: ['catalog.manage'] },
   { path: '/stock', label: 'Stock', anyOf: ['stock.adjust'] },
+  { path: '/customers', label: 'Customers', anyOf: ['customer.manage'], module: 'customers' },
+  { path: '/promotions', label: 'Promotions', anyOf: ['promotion.manage'], module: 'promotions' },
   { path: '/stores', label: 'Stores', anyOf: ['store.manage'] },
   { path: '/registers', label: 'Registers', anyOf: ['register.manage'] },
   { path: '/roles', label: 'Roles', anyOf: ['role.manage'] },
@@ -23,6 +27,6 @@ const ITEMS: NavItem[] = [
   { path: '/settings', label: 'Settings', anyOf: ['settings.manage'] },
 ];
 
-export function navItems(permissions: ReadonlySet<string>): NavItem[] {
-  return ITEMS.filter((i) => i.anyOf.length === 0 || i.anyOf.some((p) => permissions.has(p)));
+export function navItems(permissions: ReadonlySet<string>, modules: readonly string[] = []): NavItem[] {
+  return ITEMS.filter((i) => (i.anyOf.length === 0 || i.anyOf.some((p) => permissions.has(p))) && (!i.module || modules.includes(i.module)));
 }

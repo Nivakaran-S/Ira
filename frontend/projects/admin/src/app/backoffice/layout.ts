@@ -43,7 +43,7 @@ export class BackofficeLayout {
   protected readonly session = inject(BackofficeSession);
   private readonly router = inject(Router);
   protected readonly host = location.host;
-  protected readonly nav = computed(() => navItems(this.session.permissions()));
+  protected readonly nav = computed(() => navItems(this.session.permissions(), this.session.modules()));
 
   protected async signOut() {
     await this.store.logout().catch(() => undefined);

@@ -1,8 +1,9 @@
 import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@angular/core';
+import { CustomerPicker } from './customer-picker';
 import { type Discount, type ReceiptDoc, uuidv7 } from '@pos/shared';
 import { humanMessage, toApiError, ToastService, UiDialog } from 'ui';
 import { ApprovalCancelled, Approvals } from '../api/approvals';
-import { type CatalogProduct, PosApi } from '../api/pos-api';
+import { type CatalogProduct, PosApi, type TillCustomer } from '../api/pos-api';
 import { OfflineRefused, OfflineTill } from '../offline/offline-till';
 import { isOfflineError } from '../offline/sync-engine';
 import { HardwareBridge } from '../hardware/bridge';
@@ -15,7 +16,8 @@ import { ReceiptView } from './receipt-view';
 @Component({
   selector: 'pos-sell',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [UiDialog, OpenShift, PaymentPanel, ReceiptView],
+  host: { '(window:keydown)': 'onKey($event)' },
+  imports: [UiDialog, OpenShift, PaymentPanel, ReceiptView, CustomerPicker],
   template: `
     @if (!state.loaded()) {
       <p class="muted pad">Loading the till…</p>
@@ -37,7 +39,7 @@ import { ReceiptView } from './receipt-view';
             @for (p of visible(); track p.id) {
               <button type="button" class="tile" [attr.data-product]="p.name" (click)="add(p)">
                 <span class="name">{{ p.name }}</span>
-                <span class="price">{{ state.money(p.price) }}</span>
+                <span class="price">{{ p.hasVariants ? variantCount(p) + ' options' : state.money(p.price) }}</span>
               </button>
             } @empty {
               <p class="muted">No products match. Products are added in the back office under Catalog.</p>
@@ -46,6 +48,16 @@ import { ReceiptView } from './receipt-view';
         </section>
 
         <aside class="cart">
+          @if (customersOn()) {
+            <div class="cust">
+              @if (cart.customer(); as c) {
+                <span data-testid="cart-customer"><strong>{{ c.name }}</strong> <span class="small muted">{{ c.points }} pts · credit {{ state.money(c.credit) }}</span></span>
+                <button type="button" class="btn small ghost" (click)="cart.customer.set(null)">Remove</button>
+              } @else {
+                <button type="button" class="btn small" data-testid="add-customer-btn" [disabled]="state.offline()" (click)="customerOpen.set(true)">+ Customer</button>
+              }
+            </div>
+          }
           <div class="lines" data-testid="cart">
             @for (l of cart.lines(); track l.key) {
               <button type="button" class="line" [class.sel]="editing()?.key === l.key" (click)="edit(l)">
@@ -54,6 +66,7 @@ import { ReceiptView } from './receipt-view';
                   {{ state.qty(l.qtyMilli) }} × {{ state.money(l.unitPrice ?? l.product.price) }}
                   @if (l.unitPrice !== undefined) { <span class="tag">price changed</span> }
                   @if (cart.pricedLine(l.key)?.discount) { <span class="tag">−{{ state.money(cart.pricedLine(l.key)!.discount) }}</span> }
+                  @if (cart.promoLabel(l.key); as promo) { <span class="promo" data-testid="line-promo">{{ promo }}</span> }
                 </div>
               </button>
             } @empty {
@@ -62,8 +75,11 @@ import { ReceiptView } from './receipt-view';
           </div>
           <div class="totals">
             <div class="r"><span>Subtotal</span><span>{{ state.money(cart.priced().totals.subtotal) }}</span></div>
-            @if (cart.priced().totals.discountTotal) {
-              <div class="r"><span>Discounts</span><span>−{{ state.money(cart.priced().totals.discountTotal) }}</span></div>
+            @for (p of cart.promoTotals(); track p.label) {
+              <div class="r promo-row"><span>{{ p.label }}</span><span>−{{ state.money(p.amount) }}</span></div>
+            }
+            @if (manualDiscount()) {
+              <div class="r"><span>Discounts</span><span>−{{ state.money(manualDiscount()) }}</span></div>
             }
             <div class="r small muted"><span>Tax{{ cart.settings()?.pricesIncludeTax ? ' (included)' : '' }}</span><span>{{ state.money(cart.priced().totals.taxTotal) }}</span></div>
             <div class="r big"><span>Total</span><span data-testid="cart-total">{{ state.money(cart.total()) }}</span></div>
@@ -95,6 +111,25 @@ import { ReceiptView } from './receipt-view';
             <button type="button" class="btn primary" (click)="editing.set(null)">Done</button>
           </div>
         </div>
+      }
+    </ui-dialog>
+
+    <ui-dialog [title]="'Choose ' + (picking()?.name ?? '')" [open]="!!picking()" (closed)="picking.set(null)">
+      @if (picking(); as fam) {
+        <div class="grid">
+          @for (v of variantsOf(fam); track v.id) {
+            <button type="button" class="tile" [attr.data-variant]="v.variantLabel" (click)="cart.add(v); picking.set(null)">
+              <span class="name">{{ v.variantLabel ?? v.name }}</span>
+              <span class="price">{{ state.money(v.price) }}</span>
+            </button>
+          }
+        </div>
+      }
+    </ui-dialog>
+
+    <ui-dialog title="Customer" [open]="customerOpen()" (closed)="customerOpen.set(false)">
+      @if (customerOpen()) {
+        <pos-customer-picker (picked)="pickCustomer($event)" />
       }
     </ui-dialog>
 
@@ -172,6 +207,9 @@ import { ReceiptView } from './receipt-view';
     label { display: flex; flex-direction: column; gap: 4px; font-weight: 550; }
     .change { font-size: 26px; text-align: center; background: var(--ok-soft); color: var(--ok); border-radius: var(--radius-lg); padding: var(--s4); }
     .btn.danger { color: var(--danger); }
+    .cust { display: flex; justify-content: space-between; align-items: center; padding: var(--s2) var(--s4); border-bottom: 1px solid var(--border); background: var(--surface-2); }
+    .promo { background: var(--ok-soft); color: var(--ok); padding: 0 6px; border-radius: 6px; margin-left: 4px; }
+    .promo-row { color: var(--ok); }
     .offline-note { background: var(--warn-soft); color: var(--warn); padding: var(--s2) var(--s3); border-radius: var(--radius); }
     @media (max-width: 820px) { .sell { grid-template-columns: 1fr; } .cart { border-left: none; border-top: 1px solid var(--border); } }
   `,
@@ -192,24 +230,82 @@ export class Sell {
   protected readonly paying = signal(false);
   protected readonly busy = signal(false);
   protected readonly done = signal<{ receiptNo: string; change: number; receipt: ReceiptDoc | null; offline: boolean } | null>(null);
+  protected readonly picking = signal<CatalogProduct | null>(null);
+  protected readonly customerOpen = signal(false);
+  protected readonly customersOn = computed(() => (this.state.catalog()?.modules ?? []).includes('customers'));
+  protected readonly manualDiscount = computed(() => this.cart.priced().totals.discountTotal - this.cart.promoTotals().reduce((s, p) => s + p.amount, 0));
 
+  /** The grid shows standalone products and variant families; searching also finds individual variants. */
   protected readonly visible = computed(() => {
     const q = this.query().trim().toLowerCase();
     const cat = this.category();
     return (this.state.catalog()?.products ?? []).filter(
-      (p) => (!cat || p.categoryId === cat) && (!q || p.name.toLowerCase().includes(q) || p.sku?.toLowerCase() === q),
+      (p) => (!cat || p.categoryId === cat) && (q ? (p.name.toLowerCase().includes(q) || p.sku?.toLowerCase() === q) && !p.hasVariants : !p.parentId),
     );
   });
+
+  // A keyboard-wedge scanner types a whole code within milliseconds and ends with Enter.
+  private scanBuffer = '';
+  private lastKeyAt = 0;
+
+  protected onKey(e: KeyboardEvent) {
+    // Typing in a field (search, quantities) is handled by that field; the search box takes scans itself.
+    const t = e.target as HTMLElement | null;
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT')) return;
+    const now = performance.now();
+    if (now - this.lastKeyAt > 60) this.scanBuffer = '';
+    this.lastKeyAt = now;
+    if (e.key === 'Enter') {
+      const code = this.scanBuffer;
+      this.scanBuffer = '';
+      if (code.length >= 3 && this.scan(code)) {
+        e.preventDefault();
+        this.query.set('');
+      }
+    } else if (e.key.length === 1) this.scanBuffer += e.key;
+  }
+
+  /** Adds the product with this barcode or SKU. True when something matched. */
+  scan(code: string): boolean {
+    const cat = this.state.catalog();
+    if (!cat || this.paying() || !this.state.shiftOpen()) return false;
+    const id = cat.barcodes?.[code];
+    const product = cat.products.find((p) => (id ? p.id === id : p.sku === code) && !p.hasVariants);
+    if (!product) {
+      if (id || /^[0-9]{8,14}$/.test(code)) this.toasts.error(`Unknown barcode ${code}`);
+      return false;
+    }
+    this.cart.add(product);
+    return true;
+  }
+
+  protected variantsOf(family: CatalogProduct) {
+    return (this.state.catalog()?.products ?? []).filter((p) => p.parentId === family.id);
+  }
+
+  protected variantCount(family: CatalogProduct) {
+    return this.variantsOf(family).length;
+  }
+
+  protected pickCustomer(c: TillCustomer) {
+    this.cart.customer.set(c);
+    this.customerOpen.set(false);
+  }
 
   protected val(e: Event) {
     return (e.target as HTMLInputElement).value;
   }
 
   protected add(p: CatalogProduct) {
-    this.cart.add(p);
+    if (p.hasVariants) this.picking.set(p);
+    else this.cart.add(p);
   }
 
   protected addFirst() {
+    if (this.scan(this.query().trim())) {
+      this.query.set('');
+      return;
+    }
     const first = this.visible()[0];
     if (first) {
       this.add(first);
@@ -294,6 +390,7 @@ export class Sell {
     const allCash = payments.every((p) => p.method === 'CASH');
     const body = {
       id,
+      ...(this.cart.customer() ? { customerId: this.cart.customer()!.id } : {}),
       lines: this.cart.lines().map((l) => ({
         productId: l.product.id,
         qtyMilli: l.qtyMilli,
@@ -316,6 +413,7 @@ export class Sell {
   }
 
   private async completeOffline(payments: PaymentDraft[], id: string) {
+    if (this.cart.customer()) throw new OfflineRefused('Customers, points and store credit need a connection. Remove the customer to sell offline.');
     const r = await this.offlineTill.sell(payments, id);
     this.cart.clear();
     this.paying.set(false);

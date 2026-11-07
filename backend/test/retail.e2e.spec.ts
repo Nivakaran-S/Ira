@@ -171,7 +171,7 @@ describe('retail modules', () => {
       expect(r.status).toBe(200);
       expect(await bal()).toBe(5);
       const detail = await asOwner(http().get(`/api/customers/${c.body.id}`)).expect(200);
-      expect(detail.body.loyalty.map((l: { reason: string }) => l.reason)).toEqual(expect.arrayContaining(['EARN', 'REDEEM', 'RESTORE', 'REVERSE']));
+      expect(detail.body.loyaltyLedger.map((l: { reason: string }) => l.reason)).toEqual(expect.arrayContaining(['EARN', 'REDEEM', 'RESTORE', 'REVERSE']));
     });
 
     it('store credit: refund to credit, spend it later; no customer, no credit', async () => {

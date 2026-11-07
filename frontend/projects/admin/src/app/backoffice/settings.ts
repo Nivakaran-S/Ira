@@ -1,4 +1,5 @@
-import { ChangeDetectionStrategy, Component, inject, signal } from '@angular/core';
+import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@angular/core';
+import { BackofficeSession } from './session';
 import { parseSettings, type TenantSettings } from '@pos/shared';
 import { humanMessage, toApiError, ToastService, UiField } from 'ui';
 import { CommerceApi } from './commerce-api';
@@ -41,6 +42,28 @@ import { Money } from './money';
             <ui-field label="Footer" for="s-foot"><textarea id="s-foot" rows="2" [value]="v.receipt.footer" (change)="patchReceipt({ footer: val($event) })"></textarea></ui-field>
             <label class="check"><input type="checkbox" [checked]="v.receipt.showTaxBreakdown" (change)="patchReceipt({ showTaxBreakdown: checked($event) })" /> Show the tax breakdown</label>
           </section>
+          @if (loyaltyOn()) {
+            <section class="card stack">
+              <h2>Loyalty</h2>
+              <div class="grid-2">
+                <ui-field label="Spend for one point" for="s-earn" [hint]="'In ' + money.currency()">
+                  <input id="s-earn" inputmode="decimal" [value]="money.fmt(v.loyalty.earnSpend).replace(',', '')" (change)="setLoyalty('earnSpend', val($event))" />
+                </ui-field>
+                <ui-field label="Value of one point" for="s-pv" [hint]="'In ' + money.currency()">
+                  <input id="s-pv" inputmode="decimal" [value]="money.fmt(v.loyalty.pointValue).replace(',', '')" (change)="setLoyalty('pointValue', val($event))" />
+                </ui-field>
+                <ui-field label="Smallest redemption (points)" for="s-min">
+                  <input id="s-min" inputmode="numeric" [value]="v.loyalty.minRedeemPoints" (change)="setMinRedeem(val($event))" />
+                </ui-field>
+              </div>
+            </section>
+          }
+          <section class="card stack">
+            <h2>Offline selling</h2>
+            <label class="check"><input type="checkbox" [checked]="v.offline.enabled" (change)="patch({ offline: { ...v.offline, enabled: checked($event) } })" /> Tills keep selling without a connection</label>
+            <ui-field label="Longest time offline (hours)" for="s-off-h"><input id="s-off-h" inputmode="numeric" [value]="v.offline.maxHours" (change)="patch({ offline: { ...v.offline, maxHours: +val($event) || 24 } })" style="max-width: 120px" /></ui-field>
+            <label class="check"><input type="checkbox" [checked]="v.offline.allowCard" (change)="patch({ offline: { ...v.offline, allowCard: checked($event) } })" /> Card terminal works offline</label>
+          </section>
           <div><button class="btn primary" type="submit" [disabled]="busy()">Save settings</button></div>
         </form>
       } @else {
@@ -56,6 +79,17 @@ export class Settings {
   protected readonly money = inject(Money);
   protected readonly s = signal<TenantSettings | null>(null);
   protected readonly busy = signal(false);
+  private readonly session = inject(BackofficeSession);
+  protected readonly loyaltyOn = computed(() => this.session.modules().includes('loyalty'));
+
+  protected setLoyalty(key: 'earnSpend' | 'pointValue', text: string) {
+    const v = this.money.parse(text);
+    if (v && v > 0) this.s.update((x) => (x ? { ...x, loyalty: { ...x.loyalty, [key]: v } } : x));
+  }
+  protected setMinRedeem(text: string) {
+    const n = Math.trunc(Number(text));
+    if (n >= 1) this.s.update((x) => (x ? { ...x, loyalty: { ...x.loyalty, minRedeemPoints: n } } : x));
+  }
 
   constructor() {
     void this.api.settings().then((r) => this.s.set(parseSettings(r)));

@@ -1,6 +1,8 @@
 import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@angular/core';
 import { apiResource, fieldErrors, humanMessage, toApiError, ToastService, UiBadge, UiDialog, UiEmpty, UiField } from 'ui';
 import { CommerceApi, type Product } from './commerce-api';
+import { type ProductWithCodes, RetailApi } from './retail-api';
+import { BackofficeSession } from './session';
 import { Money } from './money';
 
 @Component({
@@ -25,12 +27,22 @@ import { Money } from './money';
               <tbody>
                 @for (p of filtered(); track p.id) {
                   <tr [attr.data-product]="p.name">
-                    <td>{{ p.name }} @if (!p.active) { <ui-badge tone="neutral">Inactive</ui-badge> }</td>
+                    <td>
+                      @if (asRich(p).parentId) { <span class="muted">↳ </span> }
+                      {{ p.name }} @if (!p.active) { <ui-badge tone="neutral">Inactive</ui-badge> }
+                      @if (asRich(p).hasVariants) { <ui-badge tone="accent">Variants</ui-badge> }
+                      @if (codes(p)) { <div class="small muted mono">{{ codes(p) }}</div> }
+                    </td>
                     <td class="mono small">{{ p.sku ?? '—' }}</td>
                     <td class="small">{{ categoryName(p.categoryId) }}</td>
                     <td class="small">{{ groupName(p.taxGroupId) }}</td>
                     <td class="num">{{ money.fmt(p.price) }}</td>
-                    <td><button class="btn small" type="button" (click)="openEdit(p)">Edit</button></td>
+                    <td class="row">
+                      <button class="btn small" type="button" (click)="openEdit(p)">Edit</button>
+                      @if (variantsOn() && !asRich(p).parentId) {
+                        <button class="btn small" type="button" [attr.data-variants]="p.name" (click)="openVariants(p)">Variants</button>
+                      }
+                    </td>
                   </tr>
                 }
               </tbody>
@@ -77,10 +89,32 @@ import { Money } from './money';
             </select>
           </ui-field>
         </div>
+        @if (barcodesOn() && !familyEditing()) {
+          <ui-field label="Barcodes" for="p-codes" hint="Separate several with commas." [error]="errors()['codes']">
+            <input id="p-codes" [value]="barcodes()" (input)="barcodes.set(val($event))" />
+          </ui-field>
+        }
         <label class="check"><input type="checkbox" [checked]="trackStock()" (change)="trackStock.set(checked($event))" /> Track stock</label>
         <label class="check"><input type="checkbox" [checked]="active()" (change)="active.set(checked($event))" /> Sell on tills</label>
         <div><button class="btn primary" type="submit" [disabled]="busy() || !valid()">Save</button></div>
       </form>
+    </ui-dialog>
+
+    <ui-dialog [title]="'Variants of ' + (variantsFor()?.name ?? '')" [open]="!!variantsFor()" (closed)="variantsFor.set(null)">
+      @if (variantsFor(); as fam) {
+        <div class="stack" data-testid="variants-form">
+          @for (v of variants.value() ?? []; track v.id) {
+            <div class="row-between"><span>{{ v.variantLabel }}</span><span class="muted small">{{ v.sku ?? '' }} {{ money.fmt(v.price) }}</span></div>
+          } @empty {
+            <p class="muted">Each variant becomes its own product with its own price, stock and barcode. The family itself is no longer sold.</p>
+          }
+          <ui-field label="New variants" for="v-labels" hint="Comma separated, e.g. S, M, L">
+            <input id="v-labels" [value]="newLabels()" (input)="newLabels.set(val($event))" />
+          </ui-field>
+          <ui-field label="Price (blank = family price)" for="v-price"><input id="v-price" inputmode="decimal" [value]="newPrice()" (input)="newPrice.set(val($event))" /></ui-field>
+          <div><button class="btn primary" type="button" [disabled]="!newLabels().trim()" (click)="addVariants(fam)">Add variants</button></div>
+        </div>
+      }
     </ui-dialog>
   `,
   styles: `
@@ -94,6 +128,16 @@ import { Money } from './money';
 })
 export class Catalog {
   private readonly api = inject(CommerceApi);
+  private readonly retail = inject(RetailApi);
+  private readonly session = inject(BackofficeSession);
+  protected readonly variantsOn = computed(() => this.session.modules().includes('variants'));
+  protected readonly barcodesOn = computed(() => this.session.modules().includes('barcodes'));
+  protected readonly barcodes = signal('');
+  protected readonly familyEditing = signal(false);
+  protected readonly variantsFor = signal<Product | null>(null);
+  protected readonly variants = apiResource({ params: () => this.variantsFor()?.id, loader: ({ params }) => this.retail.variants(params) });
+  protected readonly newLabels = signal('');
+  protected readonly newPrice = signal('');
   private readonly toasts = inject(ToastService);
   protected readonly money = inject(Money);
 
@@ -128,6 +172,34 @@ export class Catalog {
   protected checked(e: Event) {
     return (e.target as HTMLInputElement).checked;
   }
+  protected asRich(p: Product) {
+    return p as ProductWithCodes;
+  }
+  protected codes(p: Product) {
+    return (p as ProductWithCodes).barcodes?.map((b) => b.code).join(', ') ?? '';
+  }
+
+  protected openVariants(p: Product) {
+    this.newLabels.set('');
+    this.newPrice.set('');
+    this.variantsFor.set(p);
+  }
+
+  protected async addVariants(fam: Product) {
+    const price = this.newPrice().trim() ? this.money.parse(this.newPrice()) : undefined;
+    if (price === null) return this.toasts.error('Enter the price as an amount.');
+    const labels = this.newLabels().split(',').map((l) => l.trim()).filter(Boolean);
+    try {
+      await this.retail.addVariants(fam.id, labels.map((variantLabel) => ({ variantLabel, ...(price !== undefined ? { price } : {}) })));
+      this.toasts.success(`${labels.length} variants added`);
+      this.newLabels.set('');
+      this.variants.reload();
+      this.products.reload();
+    } catch (e) {
+      this.toasts.error(humanMessage(toApiError(e)));
+    }
+  }
+
   protected categoryName(id: string | null) {
     return this.categories.value()?.find((c) => c.id === id)?.name ?? '—';
   }
@@ -144,6 +216,8 @@ export class Catalog {
     this.taxGroupId.set(this.groups.value()?.[0]?.id ?? '');
     this.trackStock.set(true);
     this.active.set(true);
+    this.barcodes.set('');
+    this.familyEditing.set(false);
     this.errors.set({});
     this.open.set(true);
   }
@@ -157,6 +231,8 @@ export class Catalog {
     this.taxGroupId.set(p.taxGroupId ?? '');
     this.trackStock.set(p.trackStock);
     this.active.set(p.active);
+    this.barcodes.set(this.codes(p));
+    this.familyEditing.set(!!(p as ProductWithCodes).hasVariants);
     this.errors.set({});
     this.open.set(true);
   }
@@ -174,8 +250,11 @@ export class Catalog {
     };
     try {
       const id = this.editingId();
-      if (id) await this.api.updateProduct(id, input);
-      else await this.api.createProduct(input);
+      const saved = id ? await this.api.updateProduct(id, input) : await this.api.createProduct(input);
+      if (this.barcodesOn() && !this.familyEditing()) {
+        const codes = this.barcodes().split(',').map((c) => c.trim()).filter(Boolean);
+        if (codes.length || id) await this.retail.setBarcodes(saved.id, codes);
+      }
       this.toasts.success(`${input.name} saved`);
       this.open.set(false);
       this.products.reload();

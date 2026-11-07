@@ -29,7 +29,10 @@ export class TillState {
   readonly offline = computed(() => !this.session.accessToken() || !this.sync.online());
 
   constructor() {
-    effect(() => this.cart.settings.set(this.catalog()?.settings ?? null));
+    effect(() => {
+      this.cart.settings.set(this.catalog()?.settings ?? null);
+      this.cart.promotions.set(this.catalog()?.promotions ?? []);
+    });
   }
 
   async load() {

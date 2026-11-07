@@ -10,7 +10,7 @@ export interface PaymentDraft {
   reference?: string;
 }
 
-const LABEL: Record<PaymentMethodKey, string> = { CASH: 'Cash', CARD: 'Card', OTHER: 'Other' };
+const LABEL: Record<PaymentMethodKey, string> = { CASH: 'Cash', CARD: 'Card', OTHER: 'Other', LOYALTY: 'Points', STORE_CREDIT: 'Store credit' };
 
 /**
  * Takes one or more payments for the cart. All-cash sales are due at the cash-rounded total;
@@ -31,7 +31,7 @@ const LABEL: Record<PaymentMethodKey, string> = { CASH: 'Cash', CARD: 'Card', OT
       }
 
       <div class="methods">
-        @for (m of methods; track m) {
+        @for (m of methods(); track m) {
           <button type="button" class="btn" [class.primary]="method() === m" [attr.data-method]="m" (click)="pick(m)">{{ label[m] }}</button>
         }
       </div>
@@ -52,9 +52,15 @@ const LABEL: Record<PaymentMethodKey, string> = { CASH: 'Cash', CARD: 'Card', OT
         <label>Amount
           <input inputmode="decimal" [value]="amountText()" (input)="amountText.set(val($event))" />
         </label>
-        <label>{{ method() === 'CARD' ? 'Terminal approval code' : 'Reference' }} (optional)
-          <input data-testid="reference" [value]="reference()" (input)="reference.set(val($event))" />
-        </label>
+        @if (method() === 'LOYALTY') {
+          <p class="small muted" data-testid="points-note">{{ cart.customer()?.points }} points available, each worth {{ state.money(pointValue()) }}. Pay in whole points.</p>
+        } @else if (method() === 'STORE_CREDIT') {
+          <p class="small muted">{{ state.money(cart.customer()?.credit ?? 0) }} store credit available.</p>
+        } @else {
+          <label>{{ method() === 'CARD' ? 'Terminal approval code' : 'Reference' }} (optional)
+            <input data-testid="reference" [value]="reference()" (input)="reference.set(val($event))" />
+          </label>
+        }
       }
 
       @if (error()) {
@@ -83,11 +89,23 @@ const LABEL: Record<PaymentMethodKey, string> = { CASH: 'Cash', CARD: 'Card', OT
 })
 export class PaymentPanel {
   protected readonly state = inject(TillState);
-  private readonly cart = inject(Cart);
+  protected readonly cart = inject(Cart);
   readonly busy = input(false);
   readonly complete = output<PaymentDraft[]>();
 
-  protected readonly methods: PaymentMethodKey[] = ['CASH', 'CARD', 'OTHER'];
+  /** Points and store credit appear when a customer with a balance is on the sale and the till is online. */
+  protected readonly methods = computed<PaymentMethodKey[]>(() => {
+    const out: PaymentMethodKey[] = ['CASH', 'CARD', 'OTHER'];
+    const c = this.cart.customer();
+    const cat = this.state.catalog();
+    if (c && !this.state.offline()) {
+      const loyalty = this.cart.settings()?.loyalty;
+      if ((cat?.modules ?? []).includes('loyalty') && loyalty && c.points >= loyalty.minRedeemPoints) out.push('LOYALTY');
+      if (c.credit > 0) out.push('STORE_CREDIT');
+    }
+    return out;
+  });
+  protected readonly pointValue = computed(() => this.cart.settings()?.loyalty.pointValue ?? 1);
   protected readonly label = LABEL;
   protected readonly method = signal<PaymentMethodKey>('CASH');
   protected readonly paid = signal<PaymentDraft[]>([]);
@@ -119,7 +137,26 @@ export class PaymentPanel {
   protected pick(m: PaymentMethodKey) {
     this.method.set(m);
     this.error.set(null);
-    this.amountText.set(this.state.money(this.nonCashRemaining()));
+    this.amountText.set(this.state.money(this.defaultAmount(m)));
+  }
+
+  /** What a method can cover at most: the rest of the bill, capped by a balance for points and credit. */
+  private defaultAmount(m: PaymentMethodKey) {
+    const rest = this.nonCashRemaining();
+    const c = this.cart.customer();
+    if (m === 'LOYALTY' && c) return Math.min(rest - (rest % this.pointValue()), c.points * this.pointValue());
+    if (m === 'STORE_CREDIT' && c) return Math.min(rest, c.credit);
+    return rest;
+  }
+
+  private checkBalance(m: PaymentMethodKey, amount: number): string | null {
+    const c = this.cart.customer();
+    if (m === 'LOYALTY') {
+      if (amount % this.pointValue() !== 0) return `Points pay in steps of ${this.state.money(this.pointValue())}.`;
+      if (!c || amount / this.pointValue() > c.points) return 'Not enough points.';
+    }
+    if (m === 'STORE_CREDIT' && (!c || amount > c.credit)) return 'Not enough store credit.';
+    return null;
   }
 
   private nonCashRemaining() {
@@ -129,6 +166,8 @@ export class PaymentPanel {
   protected addPart() {
     const amount = this.state.parse(this.amountText());
     if (!amount || amount <= 0 || amount > this.nonCashRemaining()) return this.error.set('Enter an amount up to what is left to pay.');
+    const balanceError = this.checkBalance(this.method(), amount);
+    if (balanceError) return this.error.set(balanceError);
     this.paid.update((p) => [...p, { method: this.method(), amount, ...(this.reference().trim() ? { reference: this.reference().trim() } : {}) }]);
     this.reference.set('');
     this.error.set(null);
@@ -146,7 +185,9 @@ export class PaymentPanel {
         parts = [...parts, { method: 'CASH', amount: rest, tendered }];
       } else {
         const amount = this.state.parse(this.amountText()) ?? rest;
-        if (amount !== rest) return this.error.set('Card amount must cover what is left; use part payments to split.');
+        if (amount !== rest) return this.error.set('This amount must cover what is left; use part payments to split.');
+        const balanceError = this.checkBalance(this.method(), amount);
+        if (balanceError) return this.error.set(balanceError);
         parts = [...parts, { method: this.method(), amount, ...(this.reference().trim() ? { reference: this.reference().trim() } : {}) }];
       }
     }
