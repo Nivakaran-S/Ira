@@ -15,6 +15,17 @@ export interface TaxRateDef {
 
 export type Discount = { kind: 'percent'; bp: number } | { kind: 'amount'; amount: number };
 
+/** Where a discount came from. Promotions are applied by the system; manual ones by staff (and may need approval). */
+export type DiscountSource = 'manual' | 'promo';
+export type SourcedDiscount = Discount & { source?: DiscountSource; label?: string };
+
+export interface DiscountPart {
+  amount: number;
+  source: DiscountSource;
+  scope: 'line' | 'cart';
+  label?: string;
+}
+
 export interface PricingLineInput {
   key: string;
   unitPrice: number;
@@ -22,14 +33,14 @@ export interface PricingLineInput {
   /** Ordered: compound rates see the rates before them. */
   taxes: readonly TaxRateDef[];
   /** Applied in order, each on what is left. */
-  discounts?: readonly Discount[];
+  discounts?: readonly SourcedDiscount[];
 }
 
 export interface PricingInput {
   pricesIncludeTax: boolean;
   lines: readonly PricingLineInput[];
   /** Applied to the sale after line discounts, spread over lines by their remaining amount. */
-  cartDiscounts?: readonly Discount[];
+  cartDiscounts?: readonly SourcedDiscount[];
 }
 
 export interface PricedLine {
@@ -38,6 +49,8 @@ export interface PricedLine {
   gross: number;
   /** Every discount on this line, in order: line discounts, then its share of each cart discount. */
   discounts: number[];
+  /** The same amounts with where each came from. */
+  parts: DiscountPart[];
   discount: number;
   /** What the customer pays for the line before exclusive tax (gross − discount). */
   net: number;
@@ -160,13 +173,15 @@ export function priceSale(input: PricingInput): PricingResult {
     for (const t of l.taxes) assertInt(t.rateBp, 'rateBp');
     const gross = Number(divRound(BigInt(l.unitPrice) * BigInt(l.qtyMilli), 1000n));
     const discounts: number[] = [];
+    const parts: DiscountPart[] = [];
     let left = gross;
     for (const d of l.discounts ?? []) {
       const a = discountAmount(d, left);
       discounts.push(a);
+      parts.push({ amount: a, source: d.source ?? 'manual', scope: 'line', ...(d.label ? { label: d.label } : {}) });
       left -= a;
     }
-    return { line: l, gross, discounts, left };
+    return { line: l, gross, discounts, parts, left };
   });
 
   for (const d of input.cartDiscounts ?? []) {
@@ -175,11 +190,12 @@ export function priceSale(input: PricingInput): PricingResult {
     const shares = allocate(amount, work.map((w) => w.left));
     work.forEach((w, i) => {
       w.discounts.push(shares[i]);
+      w.parts.push({ amount: shares[i], source: d.source ?? 'manual', scope: 'cart', ...(d.label ? { label: d.label } : {}) });
       w.left -= shares[i];
     });
   }
 
-  const lines: PricedLine[] = work.map(({ line, gross, discounts, left: net }) => {
+  const lines: PricedLine[] = work.map(({ line, gross, discounts, parts, left: net }) => {
     let base: number;
     let taxes: { id: string; amount: number }[];
     if (input.pricesIncludeTax) {
@@ -194,7 +210,7 @@ export function priceSale(input: PricingInput): PricingResult {
     }
     const tax = taxes.reduce((s, t) => s + t.amount, 0);
     const discount = discounts.reduce((s, x) => s + x, 0);
-    return { key: line.key, gross, discounts, discount, net, base, taxes, tax, total: input.pricesIncludeTax ? net : net + tax };
+    return { key: line.key, gross, discounts, parts, discount, net, base, taxes, tax, total: input.pricesIncludeTax ? net : net + tax };
   });
 
   const summary = new Map<string, TaxSummary>();

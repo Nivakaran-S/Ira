@@ -13,26 +13,30 @@ export const overThreshold = (amount: number, base: number, thresholdBp: number)
 export function approvalNeeds(
   perms: ReadonlySet<string>,
   settings: TenantSettings,
-  lines: { unitPrice: number; listPrice: number; discount?: Discount }[],
+  lines: { unitPrice: number; listPrice: number }[],
   cartDiscount: Discount | undefined,
   priced: PricingResult,
 ): { action: Permission; force: boolean }[] {
   const needs: { action: Permission; force: boolean }[] = [];
   const threshold = settings.stepUp.discountAboveBp;
   if (lines.some((l) => l.unitPrice !== l.listPrice)) needs.push({ action: 'price.override', force: true });
+  // Only discounts staff typed in count; promotions are the business's own rules.
   let anyDiscount = false;
   let over = false;
-  lines.forEach((l, i) => {
-    if (!l.discount) return;
-    anyDiscount = true;
-    const pl = priced.lines[i];
-    if (overThreshold(pl.discounts[0] ?? 0, pl.gross, threshold)) over = true;
+  let cartManual = 0;
+  let cartBase = 0;
+  priced.lines.forEach((pl) => {
+    const promoLine = pl.parts.filter((p) => p.scope === 'line' && p.source === 'promo').reduce((s, p) => s + p.amount, 0);
+    const manualLine = pl.parts.filter((p) => p.scope === 'line' && p.source === 'manual').reduce((s, p) => s + p.amount, 0);
+    const allLine = pl.parts.filter((p) => p.scope === 'line').reduce((s, p) => s + p.amount, 0);
+    if (pl.parts.some((p) => p.scope === 'line' && p.source === 'manual')) anyDiscount = true;
+    if (overThreshold(manualLine, pl.gross - promoLine, threshold)) over = true;
+    cartManual += pl.parts.filter((p) => p.scope === 'cart' && p.source === 'manual').reduce((s, p) => s + p.amount, 0);
+    cartBase += pl.gross - allLine;
   });
   if (cartDiscount) {
     anyDiscount = true;
-    const cartAmount = priced.lines.reduce((s, l) => s + (l.discounts[l.discounts.length - 1] ?? 0), 0);
-    const base = priced.lines.reduce((s, l, i) => s + l.gross - (lines[i].discount ? (l.discounts[0] ?? 0) : 0), 0);
-    if (overThreshold(cartAmount, base, threshold)) over = true;
+    if (overThreshold(cartManual, cartBase, threshold)) over = true;
   }
   if (anyDiscount && (over || !perms.has('discount.apply'))) needs.push({ action: 'discount.apply', force: over });
   return needs;

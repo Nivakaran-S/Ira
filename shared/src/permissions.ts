@@ -18,6 +18,8 @@ export const PERMISSIONS = [
   'catalog.manage',
   'settings.manage',
   'sync.review',
+  'customer.manage',
+  'promotion.manage',
 ] as const;
 
 export type Permission = (typeof PERMISSIONS)[number];

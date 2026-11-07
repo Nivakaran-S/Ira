@@ -14,7 +14,7 @@ import { v7 as uuidv7 } from 'uuid';
 const PW = 'correct horse battery staple';
 const LIST_ENDPOINTS = [
   '/api/stores', '/api/registers', '/api/users', '/api/roles', '/api/devices', '/api/audit',
-  '/api/tax-rates', '/api/tax-groups', '/api/categories', '/api/products', '/api/shifts', '/api/sales',
+  '/api/tax-rates', '/api/tax-groups', '/api/categories', '/api/products', '/api/shifts', '/api/sales', '/api/customers',
 ];
 
 interface World {
@@ -50,10 +50,11 @@ async function buildTenant(app: NestExpressApplication, slug: string): Promise<W
       receiptNo: `${slug}-1`, pricesIncludeTax: true, subtotal: 500, discountTotal: 0, taxTotal: 0, total: 500, due: 500, taxes: [], soldAt: new Date(),
     },
   });
+  const customer = await db.customer.create({ data: { tenantId, name: `Customer ${slug}` } });
   const audit = await db.auditEvent.findMany({ where: { tenantId }, select: { id: true } });
   const ids = new Set([
     tenantId, owner.user.id, owner.role.id, staff.user.id, staff.role.id, store.id, register.id, device.id, ...audit.map((a) => a.id),
-    group.id, vat.id, sscl.id, category.id, product.id, shift.id, sale.id,
+    group.id, vat.id, sscl.id, category.id, product.id, shift.id, sale.id, customer.id,
   ]);
   return {
     tenantId, token, storeId: store.id, registerId: register.id, roleId: staff.role.id, userId: staff.user.id, device, ids,

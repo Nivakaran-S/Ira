@@ -27,9 +27,14 @@ export interface SaleReceiptInput {
   change: number;
   taxes: { name: string; rateBp: number; amount: number }[];
   payments: { method: string; amount: number; tendered?: number | null }[];
+  /** Promotions applied (already included in discountTotal), shown by name. */
+  promotions?: { label: string; amount: number }[];
+  customerName?: string | null;
+  pointsEarned?: number;
+  pointsBalance?: number | null;
 }
 
-const METHOD_LABEL: Record<string, string> = { CASH: 'Cash', CARD: 'Card', OTHER: 'Other' };
+const METHOD_LABEL: Record<string, string> = { CASH: 'Cash', CARD: 'Card', OTHER: 'Other', LOYALTY: 'Points', STORE_CREDIT: 'Store credit' };
 const pct = (bp: number) => `${(bp / 100).toFixed(bp % 100 ? 2 : 0)}%`;
 const textLines = (text: string) => text.split(/\r?\n/).map((l) => l.trimEnd()).filter(Boolean);
 
@@ -41,7 +46,10 @@ export function formatWhen(d: Date, timezone: string) {
 export function buildSaleReceipt(s: SaleReceiptInput): ReceiptDoc {
   const m = (n: number) => formatMinor(n, s.currency);
   const totals: ReceiptDoc['totals'] = [{ label: 'Subtotal', value: m(s.subtotal) }];
-  if (s.discountTotal) totals.push({ label: 'Discounts', value: `-${m(s.discountTotal)}` });
+  const promos = (s.promotions ?? []).filter((p) => p.amount > 0);
+  for (const p of promos) totals.push({ label: p.label, value: `-${m(p.amount)}` });
+  const manual = s.discountTotal - promos.reduce((a, p) => a + p.amount, 0);
+  if (manual) totals.push({ label: 'Discounts', value: `-${m(manual)}` });
   if (!s.pricesIncludeTax && s.taxTotal) totals.push({ label: 'Tax', value: m(s.taxTotal) });
   if (s.rounding) totals.push({ label: 'Rounding', value: m(s.rounding) });
   totals.push({ label: `TOTAL ${s.currency}`, value: m(s.due), bold: true });
@@ -54,6 +62,7 @@ export function buildSaleReceipt(s: SaleReceiptInput): ReceiptDoc {
       { label: 'Date', value: formatWhen(s.soldAt, s.timezone) },
       { label: 'Register', value: s.registerCode },
       { label: 'Cashier', value: s.cashierName },
+      ...(s.customerName ? [{ label: 'Customer', value: s.customerName }] : []),
       ...(s.notice ? [{ label: 'Note', value: s.notice }] : []),
     ],
     lines: s.lines.map((l) => ({
@@ -70,7 +79,10 @@ export function buildSaleReceipt(s: SaleReceiptInput): ReceiptDoc {
       ...s.payments.map((p) => ({ label: METHOD_LABEL[p.method] ?? p.method, value: m(p.tendered ?? p.amount) })),
       ...(s.change ? [{ label: 'Change', value: m(s.change) }] : []),
     ],
-    footer: textLines(s.footer),
+    footer: [
+      ...(s.pointsEarned ? [`Points earned: ${s.pointsEarned}${s.pointsBalance != null ? ` (balance ${s.pointsBalance})` : ''}`] : []),
+      ...textLines(s.footer),
+    ],
     barcode: s.receiptNo,
   };
 }

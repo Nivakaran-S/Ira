@@ -6,7 +6,7 @@ import { TenantDb } from '../../infra/tenant-db.service.js';
 import { SettingsService } from '../settings/settings.service.js';
 import { saleInclude } from './sales.service.js';
 
-const METHOD_LABEL: Record<string, string> = { CASH: 'Cash', CARD: 'Card', OTHER: 'Other' };
+const METHOD_LABEL: Record<string, string> = { CASH: 'Cash', CARD: 'Card', OTHER: 'Other', LOYALTY: 'Points', STORE_CREDIT: 'Store credit' };
 
 const lines = (text: string) => text.split(/\r?\n/).map((l) => l.trimEnd()).filter(Boolean);
 
@@ -19,15 +19,17 @@ export class ReceiptsService {
 
   async forSale(tenant: TenantContext, saleId: string, copy = false): Promise<ReceiptDoc> {
     const profile = await this.settings.profile(tenant.id);
-    const { sale, store, register, cashier } = await this.tenantDb.run(tenant.id, async (tx) => {
+    const { sale, store, register, cashier, customer, points } = await this.tenantDb.run(tenant.id, async (tx) => {
       const sale = await tx.sale.findUnique({ where: { id: saleId }, include: saleInclude });
       if (!sale) throw AppError.notFound('Sale not found');
-      const [store, register, cashier] = await Promise.all([
+      const [store, register, cashier, customer, points] = await Promise.all([
         tx.store.findUnique({ where: { id: sale.storeId } }),
         tx.register.findUnique({ where: { id: sale.registerId } }),
         tx.user.findUnique({ where: { id: sale.cashierId }, select: { name: true } }),
+        sale.customerId ? tx.customer.findUnique({ where: { id: sale.customerId }, select: { name: true } }) : null,
+        sale.customerId ? tx.loyaltyLedger.aggregate({ where: { customerId: sale.customerId }, _sum: { delta: true } }) : null,
       ]);
-      return { sale, store, register, cashier };
+      return { sale, store, register, cashier, customer, points };
     });
     const r = profile.settings.receipt;
     return buildSaleReceipt({
@@ -54,6 +56,10 @@ export class ReceiptsService {
       change: sale.change,
       taxes: (sale.taxes as { name: string; rateBp: number; amount: number }[]) ?? [],
       payments: sale.payments,
+      promotions: (sale.promotions as { label: string; amount: number }[]) ?? [],
+      customerName: customer?.name ?? null,
+      pointsEarned: sale.loyaltyEarned,
+      pointsBalance: points ? (points._sum.delta ?? 0) : null,
     });
   }
 

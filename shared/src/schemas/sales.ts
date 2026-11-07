@@ -9,8 +9,12 @@ export const DiscountSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('amount'), amount: positiveAmount }),
 ]);
 
-export const PAYMENT_METHODS = ['CASH', 'CARD', 'OTHER'] as const;
+export const PAYMENT_METHODS = ['CASH', 'CARD', 'OTHER', 'LOYALTY', 'STORE_CREDIT'] as const;
 export type PaymentMethodKey = (typeof PAYMENT_METHODS)[number];
+/** Methods that work without the API: points and store credit need live balances. */
+export const OFFLINE_PAYMENT_METHODS = ['CASH', 'CARD', 'OTHER'] as const;
+/** What a refund can be paid back as. */
+export const REFUND_METHODS = ['CASH', 'CARD', 'OTHER', 'STORE_CREDIT'] as const;
 
 export const PaymentInputSchema = z.object({
   method: z.enum(PAYMENT_METHODS),
@@ -33,6 +37,8 @@ export const SaleLineInputSchema = z.object({
 export const CreateSaleSchema = z.object({
   /** Client-generated UUIDv7: retries with the same id return the same sale. */
   id: z.uuid(),
+  /** Needs the customers module. Required for loyalty and store-credit payments. */
+  customerId: z.uuid().optional(),
   lines: z.array(SaleLineInputSchema).min(1).max(500),
   cartDiscount: DiscountSchema.optional(),
   payments: z.array(PaymentInputSchema).min(1).max(10),
@@ -46,7 +52,7 @@ export const CreateRefundSchema = z.object({
   id: z.uuid(),
   saleId: z.uuid(),
   lines: z.array(z.object({ saleLineId: z.uuid(), qtyMilli })).min(1).max(500),
-  method: z.enum(PAYMENT_METHODS),
+  method: z.enum(REFUND_METHODS),
   reason: z.string().trim().min(3).max(200),
   /** Put the goods back on the shelf. */
   restock: z.boolean().default(true),

@@ -1,9 +1,10 @@
 import { Body, Controller, Get, Param, ParseUUIDPipe, Patch, Post, Put, Query, Req } from '@nestjs/common';
-import { CategorySchema, ProductSchema, TaxGroupSchema, TaxRateSchema, UpdateProductSchema } from '@pos/shared';
+import { barcode, CategorySchema, CreateVariantsSchema, ProductSchema, SetBarcodesSchema, TaxGroupSchema, TaxRateSchema, UpdateProductSchema } from '@pos/shared';
 import type { z } from 'zod';
 import type { RequestWithContext } from '../../common/request-context.js';
 import { ZodPipe } from '../../common/zod.pipe.js';
-import { RequiresDevice, RequiresPermission } from '../access/decorators.js';
+import { RequiresDevice, RequiresModule, RequiresPermission } from '../access/decorators.js';
+import { AppError } from '../../common/errors/app-error.js';
 import { auditContext } from '../audit/audit-context.js';
 import { SettingsService } from '../settings/settings.service.js';
 import { CatalogService } from './catalog.service.js';
@@ -104,6 +105,27 @@ export class ProductsController {
   update(@Req() req: RequestWithContext, @Param('id', uuid) id: string, @Body(new ZodPipe(UpdateProductSchema)) body: z.infer<typeof UpdateProductSchema>) {
     return this.catalog.updateProduct(req.tenant!, auditContext(req), id, body);
   }
+
+  @RequiresModule('variants')
+  @RequiresPermission('catalog.manage')
+  @Get(':id/variants')
+  variants(@Req() req: RequestWithContext, @Param('id', uuid) id: string) {
+    return this.catalog.variantsOf(req.tenant!, id);
+  }
+
+  @RequiresModule('variants')
+  @RequiresPermission('catalog.manage')
+  @Post(':id/variants')
+  addVariants(@Req() req: RequestWithContext, @Param('id', uuid) id: string, @Body(new ZodPipe(CreateVariantsSchema)) body: z.infer<typeof CreateVariantsSchema>) {
+    return this.catalog.createVariants(req.tenant!, auditContext(req), id, body);
+  }
+
+  @RequiresModule('barcodes')
+  @RequiresPermission('catalog.manage')
+  @Put(':id/barcodes')
+  async barcodes(@Req() req: RequestWithContext, @Param('id', uuid) id: string, @Body(new ZodPipe(SetBarcodesSchema)) body: z.infer<typeof SetBarcodesSchema>) {
+    return { codes: await this.catalog.setBarcodes(req.tenant!, auditContext(req), id, body.codes) };
+  }
 }
 
 @Controller('pos')
@@ -112,6 +134,16 @@ export class PosCatalogController {
     private readonly catalog: CatalogService,
     private readonly settings: SettingsService,
   ) {}
+
+  @RequiresModule('barcodes')
+  @RequiresDevice()
+  @RequiresPermission('sale.create')
+  @Get('barcodes/:code')
+  byBarcode(@Req() req: RequestWithContext, @Param('code') code: string) {
+    const parsed = barcode.safeParse(code);
+    if (!parsed.success) throw AppError.validation([{ path: 'code', message: 'Not a barcode' }]);
+    return this.catalog.findByBarcode(req.tenant!, parsed.data);
+  }
 
   @RequiresDevice()
   @RequiresPermission('sale.create')

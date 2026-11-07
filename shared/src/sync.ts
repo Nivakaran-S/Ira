@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { PERMISSIONS } from './permissions.js';
-import { DiscountSchema, PAYMENT_METHODS, PaymentInputSchema } from './schemas/sales.js';
+import { DiscountSchema, OFFLINE_PAYMENT_METHODS, PaymentInputSchema } from './schemas/sales.js';
 
 /**
  * Offline operations. A till that cannot reach the API writes these to its outbox; each one is
@@ -25,6 +25,7 @@ export async function sha256Hex(text: string): Promise<string> {
   return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
+const AppliedPromoSchema = z.object({ promotionId: z.uuid(), label: z.string().max(80), amount: z.int().min(0) });
 const ApprovalSchema = z.object({ action: z.enum(PERMISSIONS), approverId: z.uuid() });
 const TaxDefSchema = z.object({ id: z.string().min(1).max(64), name: z.string().max(40), rateBp: z.int().min(0).max(10_000), compound: z.boolean() });
 
@@ -45,12 +46,16 @@ export const OfflineSaleSchema = z.object({
         taxes: z.array(TaxDefSchema).max(5),
         discount: DiscountSchema.optional(),
         note: z.string().max(200).optional(),
+        /** The item promotion the till applied, if any. */
+        promo: AppliedPromoSchema.optional(),
       }),
     )
     .min(1)
     .max(500),
   cartDiscount: DiscountSchema.optional(),
-  payments: z.array(PaymentInputSchema).min(1).max(10),
+  /** The spend-threshold promotion the till applied, if any. */
+  cartPromo: z.object({ promotionId: z.uuid(), label: z.string().max(80), discount: DiscountSchema }).optional(),
+  payments: z.array(PaymentInputSchema.extend({ method: z.enum(OFFLINE_PAYMENT_METHODS) })).min(1).max(10),
   expectedTotal: z.int().min(0),
   approvals: z.array(ApprovalSchema).max(5).default([]),
 });
@@ -62,7 +67,7 @@ export const OfflineRefundSchema = z.object({
   userId: z.uuid(),
   receiptNo: z.string().min(1).max(40),
   lines: z.array(z.object({ saleLineId: z.uuid(), qtyMilli: z.int().min(1) })).min(1).max(500),
-  method: z.enum(PAYMENT_METHODS),
+  method: z.enum(OFFLINE_PAYMENT_METHODS),
   reason: z.string().trim().min(3).max(200),
   restock: z.boolean(),
   approvals: z.array(ApprovalSchema).max(5).default([]),

@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import type { CategorySchema, ProductSchema, TaxGroupSchema, TaxRateDef, TaxRateSchema, UpdateProductSchema } from '@pos/shared';
+import type { CategorySchema, CreateVariantsSchema, ProductSchema, TaxGroupSchema, TaxRateDef, TaxRateSchema, UpdateProductSchema } from '@pos/shared';
 import type { z } from 'zod';
 import { AppError } from '../../common/errors/app-error.js';
 import type { TenantContext } from '../../common/request-context.js';
@@ -133,8 +133,73 @@ export class CatalogService {
         },
         orderBy: { name: 'asc' },
         take: 500,
+        include: { barcodes: { select: { code: true } } },
       }),
     );
+  }
+
+  // ── variants ──
+  /**
+   * Turns a product into a family and adds variants. Each variant is a product of its own (price,
+   * SKU, stock, barcode), so selling, stock and sync need nothing special; the family is not sold.
+   */
+  createVariants(tenant: TenantContext, ctx: Ctx, parentId: string, input: z.infer<typeof CreateVariantsSchema>) {
+    return this.tenantDb.run(tenant.id, async (tx) => {
+      const parent = await tx.product.findUnique({ where: { id: parentId } });
+      if (!parent) throw AppError.notFound('Product not found');
+      if (parent.parentId) throw new AppError('INVALID_STATE', 409, 'A variant cannot have variants of its own');
+      if (!parent.hasVariants) await tx.product.update({ where: { id: parentId }, data: { hasVariants: true } });
+      const created = [];
+      for (const v of input.variants) {
+        const p = await tx.product.create({
+          data: {
+            tenantId: tenant.id, parentId, variantLabel: v.variantLabel, name: `${parent.name} - ${v.variantLabel}`, sku: v.sku ?? null,
+            price: v.price ?? parent.price, categoryId: parent.categoryId, taxGroupId: parent.taxGroupId, trackStock: parent.trackStock, active: parent.active,
+          },
+        });
+        if (v.barcode) await tx.barcode.create({ data: { tenantId: tenant.id, code: v.barcode, productId: p.id } });
+        created.push(p);
+      }
+      await this.audit.record(tx, tenant.id, {
+        ...ctx, action: 'product.variants_created', entityType: 'Product', entityId: parentId, after: { variants: input.variants.map((v) => v.variantLabel) },
+      });
+      return created;
+    });
+  }
+
+  variantsOf(tenant: TenantContext, parentId: string) {
+    return this.tenantDb.run(tenant.id, (tx) =>
+      tx.product.findMany({ where: { parentId }, orderBy: { variantLabel: 'asc' }, include: { barcodes: { select: { code: true } } } }),
+    );
+  }
+
+  // ── barcodes ──
+  setBarcodes(tenant: TenantContext, ctx: Ctx, productId: string, codes: string[]) {
+    return this.tenantDb.run(tenant.id, async (tx) => {
+      const product = await tx.product.findUnique({ where: { id: productId } });
+      if (!product) throw AppError.notFound('Product not found');
+      if (product.hasVariants) throw new AppError('INVALID_STATE', 409, 'Barcodes belong on the variants, not the family');
+      const unique = [...new Set(codes)];
+      const taken = await tx.barcode.findMany({ where: { code: { in: unique }, productId: { not: productId } }, select: { code: true } });
+      if (taken.length) throw AppError.conflict('Barcode already used by another product', { codes: taken.map((t) => t.code) });
+      await tx.barcode.deleteMany({ where: { productId, code: { notIn: unique } } });
+      const existing = new Set((await tx.barcode.findMany({ where: { productId }, select: { code: true } })).map((b) => b.code));
+      const added = unique.filter((c) => !existing.has(c));
+      if (added.length) await tx.barcode.createMany({ data: added.map((code) => ({ tenantId: tenant.id, code, productId })) });
+      // Removing a barcode must reach tills too: touching the product bumps its sync version.
+      await tx.product.update({ where: { id: productId }, data: { updatedAt: new Date() } });
+      await this.audit.record(tx, tenant.id, { ...ctx, action: 'product.barcodes_set', entityType: 'Product', entityId: productId, after: { codes: unique } });
+      return unique;
+    });
+  }
+
+  findByBarcode(tenant: TenantContext, code: string) {
+    return this.tenantDb.run(tenant.id, async (tx) => {
+      const b = await tx.barcode.findUnique({ where: { tenantId_code: { tenantId: tenant.id, code } }, include: { product: { include: productInclude } } });
+      if (!b || !b.product.active) throw AppError.notFound('No product with that barcode');
+      const p = b.product;
+      return { id: p.id, name: p.name, sku: p.sku, price: p.price, categoryId: p.categoryId, trackStock: p.trackStock, taxes: taxStack(p.taxGroup) };
+    });
   }
 
   private async assertRefs(tx: Tx, input: { categoryId?: string | null; taxGroupId?: string | null }) {
@@ -170,12 +235,13 @@ export class CatalogService {
     return this.tenantDb.run(tenant.id, async (tx) => {
       const [categories, products] = await Promise.all([
         tx.category.findMany({ orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }], select: { id: true, name: true, color: true } }),
-        tx.product.findMany({ where: { active: true }, orderBy: { name: 'asc' }, include: productInclude }),
+        tx.product.findMany({ where: { active: true }, orderBy: { name: 'asc' }, include: { ...productInclude, barcodes: { select: { code: true } } } }),
       ]);
       return {
         categories,
         products: products.map((p) => ({
           id: p.id, name: p.name, sku: p.sku, price: p.price, categoryId: p.categoryId, trackStock: p.trackStock, taxes: taxStack(p.taxGroup),
+          hasVariants: p.hasVariants, parentId: p.parentId, variantLabel: p.variantLabel, barcodes: p.barcodes.map((b) => b.code),
         })),
       };
     });

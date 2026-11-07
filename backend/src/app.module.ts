@@ -17,10 +17,12 @@ import { InventoryModule } from './modules/inventory/inventory.module.js';
 import { SalesModule } from './modules/sales/sales.module.js';
 import { ReportingModule } from './modules/reporting/reporting.module.js';
 import { SyncModule } from './modules/sync/sync.module.js';
+import { CustomersModule } from './modules/customers/customers.module.js';
+import { PromotionsModule } from './modules/promotions/promotions.module.js';
 
 @Module({
   imports: [ScheduleModule.forRoot(), ConfigModule, InfraModule, SecurityModule, AuditModule, AccessModule, IdentityModule, BackofficeModule, PlatformModule,
-    SettingsModule, CatalogModule, InventoryModule, SalesModule, ReportingModule, SyncModule],
+    SettingsModule, CatalogModule, InventoryModule, SalesModule, ReportingModule, SyncModule, CustomersModule, PromotionsModule],
   controllers: [HealthController],
   providers: [{ provide: APP_FILTER, useClass: AppErrorFilter }],
 })

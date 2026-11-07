@@ -32,6 +32,16 @@ export const TenantSettingsSchema = z.object({
       allowCard: z.boolean().default(false),
     })
     .prefault({}),
+  loyalty: z
+    .object({
+      /** One point per this much spent (minor units). */
+      earnSpend: z.int().min(1).default(10_000),
+      /** What one point is worth when redeemed (minor units). */
+      pointValue: z.int().min(1).default(100),
+      /** Smallest redemption, in points. */
+      minRedeemPoints: z.int().min(1).default(100),
+    })
+    .prefault({}),
 });
 
 export type TenantSettings = z.infer<typeof TenantSettingsSchema>;

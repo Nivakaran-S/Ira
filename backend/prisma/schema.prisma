@@ -374,15 +374,23 @@ model Product {
   active       Boolean         @default(true)
   trackStock   Boolean         @default(true)
   customFields Json            @default("{}")
+  /// Variants module: a family (hasVariants) is not sold itself; its variants are products with parentId.
+  hasVariants  Boolean         @default(false)
+  parentId     String?         @db.Uuid
+  variantLabel String?
   createdAt    DateTime        @default(now())
   updatedAt    DateTime        @updatedAt
   category     Category?       @relation(fields: [tenantId, categoryId], references: [tenantId, id])
   taxGroup     TaxGroup?       @relation(fields: [tenantId, taxGroupId], references: [tenantId, id])
   stock        StockLevel[]
   movements    StockMovement[]
+  parent       Product?        @relation("Variants", fields: [tenantId, parentId], references: [tenantId, id])
+  variants     Product[]       @relation("Variants")
+  barcodes     Barcode[]
 
   @@unique([tenantId, id])
   @@unique([tenantId, sku])
+  @@index([tenantId, parentId])
 }
 
 // ─────────────── Inventory ───────────────
@@ -487,6 +495,8 @@ enum PaymentMethod {
   CASH
   CARD
   OTHER
+  LOYALTY
+  STORE_CREDIT
 }
 
 model Sale {
@@ -512,6 +522,12 @@ model Sale {
   taxes            Json
   cartDiscount     Json?
   approvals        Json       @default("[]")
+  /// Customers module.
+  customerId       String?    @db.Uuid
+  /// Loyalty points earned by this sale (reversed on void and, pro rata, on refund).
+  loyaltyEarned    Int        @default(0)
+  /// Promotions applied: [{promotionId, label, amount}] across lines and cart.
+  promotions       Json       @default("[]")
   soldAt           DateTime
   createdAt        DateTime   @default(now())
   /// Rung up offline and synced later; catalogVersion is the down-sync cursor the till priced it with.
@@ -528,6 +544,7 @@ model Sale {
   @@unique([tenantId, id])
   @@unique([tenantId, receiptNo])
   @@index([tenantId, soldAt])
+  @@index([tenantId, customerId, soldAt])
 }
 
 model SaleLine {
@@ -649,4 +666,111 @@ model SyncQuarantine {
   @@unique([tenantId, id])
   @@unique([tenantId, deviceId, opId])
   @@index([tenantId, status, createdAt])
+}
+
+// ---------------- Retail ----------------
+
+model Barcode {
+  id        String   @id @default(uuid(7)) @db.Uuid
+  tenantId  String   @db.Uuid
+  code      String
+  productId String   @db.Uuid
+  version   BigInt   @default(dbgenerated("nextval('sync_version')"))
+  createdAt DateTime @default(now())
+  product   Product  @relation(fields: [tenantId, productId], references: [tenantId, id], onDelete: Cascade)
+
+  @@unique([tenantId, code])
+  @@index([tenantId, productId])
+}
+
+/// Phone and email are encrypted (AES-GCM); *Idx are HMAC blind indexes for exact lookup.
+model Customer {
+  id           String   @id @default(uuid(7)) @db.Uuid
+  tenantId     String   @db.Uuid
+  name         String
+  phoneEnc     String?
+  phoneIdx     String?
+  phoneLast4   String?
+  emailEnc     String?
+  emailIdx     String?
+  notes        String?
+  customFields Json     @default("{}")
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@unique([tenantId, id])
+  @@index([tenantId, phoneIdx])
+  @@index([tenantId, emailIdx])
+  @@index([tenantId, name])
+}
+
+enum LedgerReason {
+  EARN
+  REDEEM
+  REVERSE
+  REFUND
+  ADJUST
+  RESTORE
+}
+
+/// Append-only. Balance = sum(delta). Points for loyalty.
+model LoyaltyLedger {
+  id         String       @id @default(uuid(7)) @db.Uuid
+  tenantId   String       @db.Uuid
+  customerId String       @db.Uuid
+  delta      Int
+  reason     LedgerReason
+  saleId     String?      @db.Uuid
+  refundId   String?      @db.Uuid
+  note       String?
+  userId     String?      @db.Uuid
+  createdAt  DateTime     @default(now())
+
+  @@index([tenantId, customerId, createdAt])
+}
+
+/// Append-only. Balance = sum(delta). Minor units.
+model StoreCreditLedger {
+  id         String       @id @default(uuid(7)) @db.Uuid
+  tenantId   String       @db.Uuid
+  customerId String       @db.Uuid
+  delta      Int
+  reason     LedgerReason
+  saleId     String?      @db.Uuid
+  refundId   String?      @db.Uuid
+  note       String?
+  userId     String?      @db.Uuid
+  createdAt  DateTime     @default(now())
+
+  @@index([tenantId, customerId, createdAt])
+}
+
+enum PromotionKind {
+  PERCENT_OFF
+  AMOUNT_OFF
+  BUY_X_GET_Y
+  SPEND_THRESHOLD
+}
+
+model Promotion {
+  id           String        @id @default(uuid(7)) @db.Uuid
+  tenantId     String        @db.Uuid
+  name         String
+  kind         PromotionKind
+  productIds   String[]      @db.Uuid
+  categoryIds  String[]      @db.Uuid
+  active       Boolean       @default(true)
+  startsAt     DateTime?
+  endsAt       DateTime?
+  percentBp    Int?
+  amount       Int?
+  buyQty       Int?
+  getQty       Int?
+  getPercentBp Int?
+  minSpend     Int?
+  version      BigInt        @default(dbgenerated("nextval('sync_version')"))
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  @@unique([tenantId, id])
 }

@@ -1,7 +1,10 @@
 import { Injectable } from '@nestjs/common';
 import {
-  cashRound, GENESIS, type OfflineOp, opHash, parseSettings, type Permission, priceSale, type SyncResult, type TaxRateDef, type TenantSettings,
+  applyPromotions, canonicalJson, cashRound, GENESIS, type OfflineOp, opHash, parseSettings, type Permission, priceWithPromotions, type SyncResult,
+  type TaxRateDef, type TenantSettings,
 } from '@pos/shared';
+import { PrismaService } from '../../infra/prisma.service.js';
+import { toDef } from '../promotions/promotions.service.js';
 import { AppError } from '../../common/errors/app-error.js';
 import type { TenantContext } from '../../common/request-context.js';
 import { Prisma } from '../../generated/prisma/client.js';
@@ -12,7 +15,7 @@ import { CapabilitiesService } from '../access/capabilities.service.js';
 import type { auditContext } from '../audit/audit-context.js';
 import { AuditService } from '../audit/audit.service.js';
 import { taxStack } from '../catalog/catalog.service.js';
-import { type Approval, approvalNeeds, SalesService, settlePayments } from '../sales/sales.service.js';
+import { type Approval, approvalNeeds, appliedPromotions, SalesService, settlePayments } from '../sales/sales.service.js';
 import { ShiftsService } from '../sales/shifts.service.js';
 import { SettingsService } from '../settings/settings.service.js';
 
@@ -52,13 +55,22 @@ export class SyncService {
     private readonly sales: SalesService,
     private readonly shifts: ShiftsService,
     private readonly audit: AuditService,
+    private readonly prisma: PrismaService,
   ) {}
+
+  private async businessTypeOf(tenantId: string) {
+    return (await this.prisma.tenant.findUniqueOrThrow({ where: { id: tenantId }, select: { businessTypeId: true } })).businessTypeId;
+  }
 
   // ───────────────────────────── down ─────────────────────────────
 
   async down(tenant: TenantContext, device: { id: string; registerId: string }, cursor: bigint, blockNext?: number) {
-    const profile = await this.settings.profile(tenant.id);
+    const [profile, modules] = await Promise.all([this.settings.profile(tenant.id), this.capabilities.modulesFor(tenant)]);
     const data = await this.tenantDb.run(tenant.id, async (tx) => {
+      const [barcodes, promotions] = await Promise.all([
+        modules.includes('barcodes') ? tx.barcode.findMany({ where: { version: { gt: cursor } }, select: { code: true, productId: true, version: true } }) : [],
+        modules.includes('promotions') ? tx.promotion.findMany({ where: { version: { gt: cursor } } }) : [],
+      ]);
       const [register, dev, categories, products, groups, shift] = await Promise.all([
         tx.register.findUniqueOrThrow({ where: { id: device.registerId }, include: { store: { select: { id: true, name: true, code: true } } } }),
         tx.device.findUniqueOrThrow({ where: { id: device.id } }),
@@ -74,9 +86,16 @@ export class SyncService {
         update: { lastContactAt: new Date() },
       });
       const users = await tx.user.findMany({ where: { status: 'ACTIVE', pinHash: { not: null } }, select: { id: true, name: true }, orderBy: { name: 'asc' } });
-      const versions = [cursor, ...categories.map((c) => c.version), ...products.map((p) => p.version), ...groups.map((g) => g.version)];
+      const versions = [
+        cursor, ...categories.map((c) => c.version), ...products.map((p) => p.version), ...groups.map((g) => g.version),
+        ...barcodes.map((b) => b.version), ...promotions.map((p) => p.version),
+      ];
+      // A product touched since the cursor carries its full barcode list, so removed codes disappear too.
+      const productBarcodes = products.length
+        ? await tx.barcode.findMany({ where: { productId: { in: products.map((p) => p.id) } }, select: { code: true, productId: true } })
+        : [];
       return {
-        register, block, categories, products, groups, users,
+        register, block, categories, products, groups, users, barcodes: [...barcodes, ...productBarcodes], promotions,
         shift: shift ? await this.shifts.report(tx, shift.id) : null,
         next: versions.reduce((m, v) => (v > m ? v : m), cursor),
       };
@@ -97,9 +116,14 @@ export class SyncService {
       shift: data.shift,
       users,
       categories: data.categories.map((c) => ({ id: c.id, name: c.name, color: c.color, sortOrder: c.sortOrder })),
+      modules,
       products: data.products.map((p) => ({
         id: p.id, name: p.name, sku: p.sku, price: p.price, categoryId: p.categoryId, taxGroupId: p.taxGroupId, active: p.active, trackStock: p.trackStock,
+        hasVariants: p.hasVariants, parentId: p.parentId, variantLabel: p.variantLabel,
       })),
+      /** code → productId; a product listed in `products` sends all its codes (replace, not merge). */
+      barcodes: data.barcodes.map((b) => ({ code: b.code, productId: b.productId })),
+      promotions: data.promotions.map(toDef),
       taxGroups: data.groups.map((g) => ({ id: g.id, name: g.name, rates: taxStack(g) })),
     };
   }
@@ -268,10 +292,27 @@ export class SyncService {
         }
       }
       if (!waive.method && !settings.offline.allowCard && s.payments.some((p) => p.method !== 'CASH')) throw new Reject('METHOD_NOT_ALLOWED_OFFLINE');
-      const priced = priceSale({
-        pricesIncludeTax: settings.pricesIncludeTax,
-        lines: s.lines.map((l, i) => ({ key: String(i), unitPrice: l.unitPrice, qtyMilli: l.qtyMilli, taxes: l.taxes, discounts: l.discount ? [l.discount] : [] })),
-        cartDiscounts: s.cartDiscount ? [s.cartDiscount] : [],
+      // Promotions: what the till applied must match the promotions it knew. If any promotion changed
+      // after the till's snapshot, the till's version is the fact (like prices).
+      const pricingLines = s.lines.map((l, i) => {
+        const p = byId.get(l.productId)!;
+        return { key: String(i), productId: p.id, categoryId: p.categoryId, unitPrice: l.unitPrice, qtyMilli: l.qtyMilli, taxes: l.taxes, discount: l.discount };
+      });
+      const applied = {
+        lines: Object.fromEntries(s.lines.flatMap((l, i) => (l.promo ? [[String(i), [l.promo]]] : []))),
+        cart: s.cartPromo ? [s.cartPromo] : [],
+      };
+      const promoOn = (await this.capabilities.modulesFor({ id: tenantId, businessTypeId: await this.businessTypeOf(tenantId) })).includes('promotions');
+      if (!waive.prices) {
+        const all = promoOn ? await tx.promotion.findMany() : [];
+        const changed = all.some((p) => p.version > cv);
+        if (!changed) {
+          const fresh = applyPromotions(pricingLines, all.filter((p) => p.active).map(toDef), at);
+          if (canonicalJson(fresh) !== canonicalJson(applied)) throw new Reject('PROMO_MISMATCH', { till: applied, server: fresh });
+        }
+      }
+      const { priced } = priceWithPromotions({
+        pricesIncludeTax: settings.pricesIncludeTax, lines: pricingLines, cartDiscount: s.cartDiscount, promotions: [], now: at, applied,
       });
       const allCash = s.payments.every((p) => p.method === 'CASH');
       const due = allCash ? cashRound(priced.totals.total, settings.cashRoundingUnit) : priced.totals.total;
@@ -285,6 +326,7 @@ export class SyncService {
         id: s.id, storeId: shift.storeId, registerId: device.registerId, shiftId: shift.id, deviceId: device.id, cashierId: s.cashierId,
         receiptNo: s.receiptNo, pricesIncludeTax: settings.pricesIncludeTax, priced, due, payments, cartDiscount: s.cartDiscount,
         approvals: s.approvals, soldAt: at, offline: true, catalogVersion: cv,
+        promotions: appliedPromotions(priced, new Map([...Object.values(applied.lines).flat(), ...applied.cart].map((a) => [a.label, a.promotionId]))),
         lines: s.lines.map((l) => {
           const p = byId.get(l.productId)!;
           return { productId: p.id, name: p.name, sku: p.sku, unitPrice: l.unitPrice, listPrice: l.listPrice, qtyMilli: l.qtyMilli, note: l.note, trackStock: p.trackStock };

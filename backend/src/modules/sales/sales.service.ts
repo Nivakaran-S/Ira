@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import {
-  approvalNeeds, cashRound, type CreateRefundSchema, type CreateSaleSchema, type Discount, type PaymentMethodKey, type Permission, type PricingResult, type PricingLineInput,
-  priceSale, prorate, type TenantSettings,
+  approvalNeeds, cashRound, type CreateRefundSchema, type CreateSaleSchema, type Discount, type ModuleKey, type PaymentMethodKey, type Permission,
+  pointsEarned, priceWithPromotions, type PricingResult, prorate, type TenantSettings,
 } from '@pos/shared';
 import type { z } from 'zod';
 import { AppError } from '../../common/errors/app-error.js';
@@ -14,7 +14,9 @@ import { StepUpGate } from '../access/step-up-gate.js';
 import { auditContext } from '../audit/audit-context.js';
 import { type AuditEntry, AuditService } from '../audit/audit.service.js';
 import { productInclude, taxStack } from '../catalog/catalog.service.js';
-import { InventoryService, type StockChange } from '../inventory/inventory.service.js';
+import { LedgersService } from '../customers/ledgers.service.js';
+import { InventoryService } from '../inventory/inventory.service.js';
+import { PromotionsService } from '../promotions/promotions.service.js';
 import { SettingsService } from '../settings/settings.service.js';
 import { ShiftsService } from './shifts.service.js';
 
@@ -95,7 +97,40 @@ export interface SaleRecord {
   soldAt: Date;
   offline: boolean;
   catalogVersion: bigint | null;
+  customerId?: string | null;
+  /** Promotions applied, summed per promotion. */
+  promotions?: AppliedPromotion[];
+  /** Set when the loyalty module is on: how points are earned and what they are worth. */
+  loyalty?: TenantSettings['loyalty'] | null;
   lines: { productId: string; name: string; sku: string | null; unitPrice: number; listPrice: number; qtyMilli: number; note?: string; trackStock: boolean }[];
+}
+
+export interface AppliedPromotion {
+  promotionId: string;
+  label: string;
+  amount: number;
+}
+
+/** Promotion amounts out of the priced sale, one entry per promotion. */
+export function appliedPromotions(priced: PricingResult, ids: Map<string, string>): AppliedPromotion[] {
+  const byLabel = new Map<string, number>();
+  for (const l of priced.lines) for (const p of l.parts) if (p.source === 'promo' && p.label) byLabel.set(p.label, (byLabel.get(p.label) ?? 0) + p.amount);
+  return [...byLabel].map(([label, amount]) => ({ promotionId: ids.get(label) ?? '', label, amount }));
+}
+
+/** Points and store credit need the customer on the sale and the right modules. */
+export function checkTenderRules(payments: { method: PaymentMethodKey; amount: number }[], customerId: string | undefined | null, modules: ModuleKey[], settings: TenantSettings) {
+  for (const p of payments) {
+    if (p.method === 'LOYALTY') {
+      if (!modules.includes('loyalty')) throw new AppError('MODULE_DISABLED', 403, 'Module loyalty is not enabled', { module: 'loyalty' });
+      if (!customerId) throw new AppError('INVALID_STATE', 409, 'Add the customer to pay with points');
+      if (p.amount % settings.loyalty.pointValue !== 0) throw AppError.validation([{ path: 'payments', message: 'Points pay in whole points' }]);
+      if (p.amount / settings.loyalty.pointValue < settings.loyalty.minRedeemPoints) {
+        throw new AppError('INVALID_STATE', 409, `At least ${settings.loyalty.minRedeemPoints} points must be redeemed at once`);
+      }
+    }
+    if (p.method === 'STORE_CREDIT' && !customerId) throw new AppError('INVALID_STATE', 409, 'Add the customer to pay with store credit');
+  }
 }
 
 /** Payments must add up to the amount due exactly; cash may be over-tendered and gives change. */
@@ -120,6 +155,8 @@ export class SalesService {
     private readonly shifts: ShiftsService,
     private readonly inventory: InventoryService,
     private readonly audit: AuditService,
+    private readonly ledgers: LedgersService,
+    private readonly promotions: PromotionsService,
   ) {}
 
   /** The cashier's own permission is enough unless the action crosses a threshold; otherwise a manager approves. */
@@ -164,25 +201,33 @@ export class SalesService {
     const existing = await this.tenantDb.run(tenant.id, (tx) => this.getSale(tx, input.id));
     if (existing) return existing;
 
-    const [settings, perms] = await Promise.all([this.settings.get(tenant.id), this.capabilities.permissionsFor(tenant.id, cashierId)]);
-    const products = await this.tenantDb.run(tenant.id, (tx) =>
-      tx.product.findMany({ where: { id: { in: [...new Set(input.lines.map((l) => l.productId))] }, active: true }, include: productInclude }),
-    );
+    const [settings, perms, modules] = await Promise.all([
+      this.settings.get(tenant.id), this.capabilities.permissionsFor(tenant.id, cashierId), this.capabilities.modulesFor(tenant),
+    ]);
+    if (input.customerId && !modules.includes('customers')) throw new AppError('MODULE_DISABLED', 403, 'Module customers is not enabled', { module: 'customers' });
+    checkTenderRules(input.payments, input.customerId, modules, settings);
+    const { products, promos, customerOk } = await this.tenantDb.run(tenant.id, async (tx) => ({
+      products: await tx.product.findMany({ where: { id: { in: [...new Set(input.lines.map((l) => l.productId))] }, active: true }, include: productInclude }),
+      promos: modules.includes('promotions') ? await this.promotions.live(tx) : [],
+      customerOk: input.customerId ? !!(await tx.customer.findUnique({ where: { id: input.customerId } })) : true,
+    }));
+    if (!customerOk) throw AppError.notFound('Customer not found');
     const byId = new Map(products.map((p) => [p.id, p]));
     const missing = input.lines.filter((l) => !byId.has(l.productId)).map((l) => l.productId);
     if (missing.length) throw new AppError('NOT_FOUND', 404, 'Product not found or inactive', { productIds: [...new Set(missing)] });
+    const family = products.find((p) => p.hasVariants);
+    if (family) throw new AppError('INVALID_STATE', 409, `Choose a variant of ${family.name}`, { productId: family.id });
 
-    const pricingLines: PricingLineInput[] = input.lines.map((l, i) => {
-      const p = byId.get(l.productId)!;
-      return {
-        key: String(i),
-        unitPrice: l.unitPrice ?? p.price,
-        qtyMilli: l.qtyMilli,
-        taxes: taxStack(p.taxGroup),
-        discounts: l.discount ? [l.discount] : [],
-      };
+    const { priced } = priceWithPromotions({
+      pricesIncludeTax: settings.pricesIncludeTax,
+      lines: input.lines.map((l, i) => {
+        const p = byId.get(l.productId)!;
+        return { key: String(i), productId: p.id, categoryId: p.categoryId, unitPrice: l.unitPrice ?? p.price, qtyMilli: l.qtyMilli, taxes: taxStack(p.taxGroup), discount: l.discount };
+      }),
+      cartDiscount: input.cartDiscount,
+      promotions: promos,
+      now: new Date(),
     });
-    const priced = priceSale({ pricesIncludeTax: settings.pricesIncludeTax, lines: pricingLines, cartDiscounts: input.cartDiscount ? [input.cartDiscount] : [] });
 
     const approvals: Approval[] = [];
     const saleLines = input.lines.map((l) => ({ ...l, listPrice: byId.get(l.productId)!.price, unitPrice: l.unitPrice ?? byId.get(l.productId)!.price }));
@@ -201,7 +246,9 @@ export class SalesService {
       await this.persistSale(tx, tenant.id, {
         id: input.id, storeId: shift.storeId, registerId: device.registerId, shiftId: shift.id, deviceId: device.id, cashierId, receiptNo,
         pricesIncludeTax: settings.pricesIncludeTax, priced, due, payments, cartDiscount: input.cartDiscount, approvals, soldAt: new Date(),
-        offline: false, catalogVersion: null,
+        offline: false, catalogVersion: null, customerId: input.customerId ?? null,
+        promotions: appliedPromotions(priced, new Map(promos.map((p) => [p.name, p.id]))),
+        loyalty: modules.includes('loyalty') ? settings.loyalty : null,
         lines: input.lines.map((l) => {
           const p = byId.get(l.productId)!;
           return { productId: p.id, name: p.name, sku: p.sku, unitPrice: l.unitPrice ?? p.price, listPrice: p.price, qtyMilli: l.qtyMilli, note: l.note, trackStock: p.trackStock };
@@ -213,6 +260,29 @@ export class SalesService {
 
   /** Writes a priced, paid sale with its lines, payments, stock movements and audit event. */
   async persistSale(tx: Tx, tenantId: string, r: SaleRecord, ctx: Partial<AuditEntry>) {
+    let loyaltyEarned = 0;
+    if (r.customerId) {
+      // Spend balances under a per-customer lock so two tills cannot spend the same points or credit.
+      await this.ledgers.lock(tx, r.customerId);
+      const paidWith = (m: PaymentMethodKey) => r.payments.filter((p) => p.method === m).reduce((s, p) => s + p.amount, 0);
+      const pointsPaid = paidWith('LOYALTY');
+      const creditPaid = paidWith('STORE_CREDIT');
+      if (pointsPaid) {
+        const points = pointsPaid / (r.loyalty?.pointValue ?? 1);
+        const have = await this.ledgers.balance(tx, 'loyalty', r.customerId);
+        if (have < points) throw new AppError('INVALID_STATE', 409, 'Not enough loyalty points', { balance: have, needed: points });
+        await this.ledgers.add(tx, tenantId, 'loyalty', { customerId: r.customerId, delta: -points, reason: 'REDEEM', saleId: r.id, userId: r.cashierId });
+      }
+      if (creditPaid) {
+        const have = await this.ledgers.balance(tx, 'credit', r.customerId);
+        if (have < creditPaid) throw new AppError('INVALID_STATE', 409, 'Not enough store credit', { balance: have, needed: creditPaid });
+        await this.ledgers.add(tx, tenantId, 'credit', { customerId: r.customerId, delta: -creditPaid, reason: 'REDEEM', saleId: r.id, userId: r.cashierId });
+      }
+      if (r.loyalty) {
+        loyaltyEarned = pointsEarned(r.due - pointsPaid - creditPaid, r.loyalty.earnSpend);
+        await this.ledgers.add(tx, tenantId, 'loyalty', { customerId: r.customerId, delta: loyaltyEarned, reason: 'EARN', saleId: r.id, userId: r.cashierId });
+      }
+    }
     await tx.sale.create({
       data: {
         id: r.id, tenantId, storeId: r.storeId, registerId: r.registerId, shiftId: r.shiftId, deviceId: r.deviceId,
@@ -221,6 +291,7 @@ export class SalesService {
         rounding: r.due - r.priced.totals.total, due: r.due, change: r.payments.reduce((s, p) => s + p.change, 0),
         taxes: json(r.priced.taxes), cartDiscount: r.cartDiscount ? json(r.cartDiscount) : Prisma.DbNull, approvals: json(r.approvals),
         soldAt: r.soldAt, offline: r.offline, catalogVersion: r.catalogVersion,
+        customerId: r.customerId ?? null, loyaltyEarned, promotions: json(r.promotions ?? []),
         lines: {
           create: r.priced.lines.map((l, i) => {
             const src = r.lines[i];
@@ -262,6 +333,16 @@ export class SalesService {
       if (sale.shiftId !== shift.id) throw new AppError('INVALID_STATE', 409, 'Only sales from the current shift on this register can be voided');
 
       await tx.sale.update({ where: { id: saleId }, data: { status: 'VOIDED', voidedAt: new Date(), voidedById: req.principal!.userId, voidReason: reason } });
+      if (sale.customerId) {
+        // Undo everything the sale did to the customer's balances.
+        const userId = req.principal!.userId;
+        await this.ledgers.lock(tx, sale.customerId);
+        for (const kind of ['loyalty', 'credit'] as const) {
+          const redeemed = await this.ledgers.sumFor(tx, kind, sale.id, 'REDEEM');
+          await this.ledgers.add(tx, tenant.id, kind, { customerId: sale.customerId, delta: -redeemed, reason: 'RESTORE', saleId: sale.id, userId, note: 'Sale voided' });
+        }
+        await this.ledgers.add(tx, tenant.id, 'loyalty', { customerId: sale.customerId, delta: -sale.loyaltyEarned, reason: 'REVERSE', saleId: sale.id, userId, note: 'Sale voided' });
+      }
       const tracked = await tx.product.findMany({ where: { id: { in: sale.lines.map((l) => l.productId) }, trackStock: true }, select: { id: true } });
       const trackedIds = new Set(tracked.map((p) => p.id));
       await this.inventory.apply(
@@ -291,6 +372,7 @@ export class SalesService {
     if (!sale) throw AppError.notFound('Sale not found');
     if (sale.status !== 'COMPLETED') throw new AppError('INVALID_STATE', 409, 'Voided sales cannot be refunded');
 
+    if (input.method === 'STORE_CREDIT' && !sale.customerId) throw new AppError('INVALID_STATE', 409, 'Only sales with a customer can be refunded to store credit');
     const lines = this.refundLines(sale, input);
     const total = lines.reduce((s, l) => s + l.total, 0);
     const taxTotal = lines.reduce((s, l) => s + l.tax, 0);
@@ -334,6 +416,20 @@ export class SalesService {
       },
       include: { lines: true },
     });
+    const sale = await tx.sale.findUniqueOrThrow({ where: { id: r.saleId }, select: { customerId: true, loyaltyEarned: true, total: true } });
+    if (sale.customerId) {
+      await this.ledgers.lock(tx, sale.customerId);
+      if (r.method === 'STORE_CREDIT') {
+        await this.ledgers.add(tx, tenantId, 'credit', { customerId: sale.customerId, delta: r.paidOut, reason: 'REFUND', saleId: r.saleId, refundId: r.id, userId: r.userId });
+      }
+      if (sale.loyaltyEarned > 0) {
+        // Points earned come back in proportion to what has been refunded so far.
+        const refunded = (await tx.refund.aggregate({ where: { saleId: r.saleId }, _sum: { total: true } }))._sum.total ?? 0;
+        const target = Math.min(sale.loyaltyEarned, prorate(sale.loyaltyEarned, refunded, sale.total));
+        const already = -(await this.ledgers.sumFor(tx, 'loyalty', r.saleId, 'REVERSE'));
+        await this.ledgers.add(tx, tenantId, 'loyalty', { customerId: sale.customerId, delta: -(target - already), reason: 'REVERSE', saleId: r.saleId, refundId: r.id, userId: r.userId });
+      }
+    }
     if (r.restock) {
       const tracked = await tx.product.findMany({ where: { id: { in: r.lines.map((l) => l.productId) }, trackStock: true }, select: { id: true } });
       const trackedIds = new Set(tracked.map((p) => p.id));
