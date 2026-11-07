@@ -32,3 +32,14 @@ describe('tenant settings', () => {
     expect(parseSettings(null).receipt.footer).toBe('Thank you!');
   });
 });
+
+describe('uuidv7', async () => {
+  const { uuidv7 } = await import('./uuid.js');
+  it('is a valid, time-ordered v7 uuid', () => {
+    const a = uuidv7(1_700_000_000_000);
+    const b = uuidv7(1_700_000_000_001);
+    expect(a).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    expect(a < b).toBe(true);
+    expect(a.slice(0, 8)).toBe((1_700_000_000_000).toString(16).padStart(12, '0').slice(0, 8));
+  });
+});

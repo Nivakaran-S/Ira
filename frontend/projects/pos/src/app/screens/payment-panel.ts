@@ -1,0 +1,156 @@
+import { ChangeDetectionStrategy, Component, computed, inject, input, output, signal } from '@angular/core';
+import type { PaymentMethodKey } from '@pos/shared';
+import { Cart } from '../sell/cart';
+import { TillState } from '../till-state';
+
+export interface PaymentDraft {
+  method: PaymentMethodKey;
+  amount: number;
+  tendered?: number;
+  reference?: string;
+}
+
+const LABEL: Record<PaymentMethodKey, string> = { CASH: 'Cash', CARD: 'Card', OTHER: 'Other' };
+
+/**
+ * Takes one or more payments for the cart. All-cash sales are due at the cash-rounded total;
+ * as soon as any non-cash payment is involved the exact total is due.
+ */
+@Component({
+  selector: 'pos-payment-panel',
+  changeDetection: ChangeDetectionStrategy.OnPush,
+  template: `
+    <div class="stack" data-testid="payment">
+      <div class="due">
+        <span class="muted">{{ paid().length ? 'Remaining' : 'To pay' }}</span>
+        <strong data-testid="due">{{ state.money(remaining()) }}</strong>
+      </div>
+
+      @for (p of paid(); track $index) {
+        <div class="row-between small"><span>{{ label[p.method] }} {{ p.reference ? '· ' + p.reference : '' }}</span><span>{{ state.money(p.amount) }}</span></div>
+      }
+
+      <div class="methods">
+        @for (m of methods; track m) {
+          <button type="button" class="btn" [class.primary]="method() === m" [attr.data-method]="m" (click)="pick(m)">{{ label[m] }}</button>
+        }
+      </div>
+
+      @if (method() === 'CASH') {
+        <label>Cash received
+          <input inputmode="decimal" data-testid="tendered" [value]="tenderedText()" (input)="tenderedText.set(val($event))" />
+        </label>
+        <div class="quick">
+          @for (q of quick(); track q) {
+            <button type="button" class="btn" (click)="tenderedText.set(state.money(q))">{{ state.money(q) }}</button>
+          }
+        </div>
+        @if (change() > 0) {
+          <div class="change">Change {{ state.money(change()) }}</div>
+        }
+      } @else {
+        <label>Amount
+          <input inputmode="decimal" [value]="amountText()" (input)="amountText.set(val($event))" />
+        </label>
+        <label>{{ method() === 'CARD' ? 'Terminal approval code' : 'Reference' }} (optional)
+          <input data-testid="reference" [value]="reference()" (input)="reference.set(val($event))" />
+        </label>
+      }
+
+      @if (error()) {
+        <div class="error-text" role="alert">{{ error() }}</div>
+      }
+      <div class="row-between">
+        @if (canSplit()) {
+          <button type="button" class="btn" (click)="addPart()">Add as part payment</button>
+        } @else {
+          <span></span>
+        }
+        <button type="button" class="btn primary go" data-testid="complete" [disabled]="busy()" (click)="finish()">Complete sale</button>
+      </div>
+    </div>
+  `,
+  styles: `
+    .due { display: flex; justify-content: space-between; align-items: baseline; font-size: 18px; }
+    .due strong { font-size: 30px; }
+    .methods { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--s2); }
+    .methods .btn { min-height: 56px; font-size: 17px; }
+    .quick { display: flex; gap: var(--s2); flex-wrap: wrap; }
+    label { display: flex; flex-direction: column; gap: 4px; font-weight: 550; }
+    .change { font-size: 22px; font-weight: 700; color: var(--ok); text-align: center; }
+    .go { min-height: 52px; min-width: 180px; font-size: 17px; }
+  `,
+})
+export class PaymentPanel {
+  protected readonly state = inject(TillState);
+  private readonly cart = inject(Cart);
+  readonly busy = input(false);
+  readonly complete = output<PaymentDraft[]>();
+
+  protected readonly methods: PaymentMethodKey[] = ['CASH', 'CARD', 'OTHER'];
+  protected readonly label = LABEL;
+  protected readonly method = signal<PaymentMethodKey>('CASH');
+  protected readonly paid = signal<PaymentDraft[]>([]);
+  protected readonly tenderedText = signal('');
+  protected readonly amountText = signal('');
+  protected readonly reference = signal('');
+  protected readonly error = signal<string | null>(null);
+
+  private readonly allCash = computed(() => this.method() === 'CASH' && this.paid().every((p) => p.method === 'CASH'));
+  /** What the sale costs given the methods in play. */
+  private readonly due = computed(() => (this.allCash() ? this.cart.cashDue() : this.cart.total()));
+  protected readonly remaining = computed(() => Math.max(0, this.due() - this.paid().reduce((s, p) => s + p.amount, 0)));
+  private readonly tendered = computed(() => this.state.parse(this.tenderedText()) ?? 0);
+  protected readonly change = computed(() => Math.max(0, this.tendered() - this.remaining()));
+  protected readonly canSplit = computed(() => this.method() !== 'CASH' && this.paid().length < 5);
+
+  /** Exact, then the next round notes above it. */
+  protected readonly quick = computed(() => {
+    const r = this.remaining();
+    const out = new Set<number>([r]);
+    for (const unit of [10_000, 50_000, 100_000, 500_000]) out.add(Math.ceil(r / unit) * unit);
+    return [...out].filter((v) => v >= r).sort((a, b) => a - b).slice(0, 4);
+  });
+
+  protected val(e: Event) {
+    return (e.target as HTMLInputElement).value;
+  }
+
+  protected pick(m: PaymentMethodKey) {
+    this.method.set(m);
+    this.error.set(null);
+    this.amountText.set(this.state.money(this.nonCashRemaining()));
+  }
+
+  private nonCashRemaining() {
+    return Math.max(0, this.cart.total() - this.paid().reduce((s, p) => s + p.amount, 0));
+  }
+
+  protected addPart() {
+    const amount = this.state.parse(this.amountText());
+    if (!amount || amount <= 0 || amount > this.nonCashRemaining()) return this.error.set('Enter an amount up to what is left to pay.');
+    this.paid.update((p) => [...p, { method: this.method(), amount, ...(this.reference().trim() ? { reference: this.reference().trim() } : {}) }]);
+    this.reference.set('');
+    this.error.set(null);
+    this.method.set('CASH');
+  }
+
+  protected finish() {
+    this.error.set(null);
+    const rest = this.remaining();
+    let parts = this.paid();
+    if (rest > 0) {
+      if (this.method() === 'CASH') {
+        const tendered = this.tenderedText().trim() ? this.tendered() : rest;
+        if (tendered < rest) return this.error.set('Cash received is less than the amount to pay.');
+        parts = [...parts, { method: 'CASH', amount: rest, tendered }];
+      } else {
+        const amount = this.state.parse(this.amountText()) ?? rest;
+        if (amount !== rest) return this.error.set('Card amount must cover what is left; use part payments to split.');
+        parts = [...parts, { method: this.method(), amount, ...(this.reference().trim() ? { reference: this.reference().trim() } : {}) }];
+      }
+    }
+    if (!parts.length) return this.error.set('Nothing to pay.');
+    this.complete.emit(parts);
+  }
+}

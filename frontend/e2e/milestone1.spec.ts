@@ -31,7 +31,7 @@ async function setPasswordAndEnrolMfa(page: Page, origin: string, code: string, 
 test.describe.configure({ mode: 'serial' });
 
 test('Milestone 1: onboard a tenant, enrol a till, and sign a cashier in — all in the browser', async ({ browser }) => {
-  const { email: adminEmail, code: adminCode } = JSON.parse(readFileSync(STATE_FILE, 'utf8')) as { email: string; code: string };
+  const { email: adminEmail, code: adminCode } = (JSON.parse(readFileSync(STATE_FILE, 'utf8')) as Record<string, { email: string; code: string }>)['m1']!;
 
   // Separate browser contexts = separate cookie jars, like separate machines.
   const consoleCtx = await browser.newContext();
@@ -113,7 +113,7 @@ test('Milestone 1: onboard a tenant, enrol a till, and sign a cashier in — all
   await expect(till.getByRole('alert')).toHaveText('Wrong PIN. Try again.');
   for (const d of '4321') await till.getByRole('button', { name: d, exact: true }).click();
   await till.getByRole('button', { name: 'Enter' }).click();
-  await expect(till.getByTestId('till-ready')).toBeVisible();
+  await expect(till.getByTestId('open-shift')).toBeVisible();
   await expect(till.getByTestId('cashier')).toHaveText('Kamal Cashier');
 
   // The session survives a reload (silent, device-signed refresh) and the key stays on the device.

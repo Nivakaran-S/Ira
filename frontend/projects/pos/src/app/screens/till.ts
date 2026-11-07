@@ -1,51 +1,83 @@
-import { HttpClient } from '@angular/common/http';
-import { ChangeDetectionStrategy, Component, inject } from '@angular/core';
-import { Router } from '@angular/router';
-import { firstValueFrom } from 'rxjs';
-import { apiResource } from 'ui';
+import { ChangeDetectionStrategy, Component, inject, type OnInit } from '@angular/core';
+import { Router, RouterLink, RouterLinkActive, RouterOutlet } from '@angular/router';
+import { humanMessage, toApiError } from 'ui';
 import { PosSession } from '../device/pos-session';
+import { HardwareBridge } from '../hardware/bridge';
+import { TillState } from '../till-state';
+import { ApprovalDialog } from './approval-dialog';
 
-interface Me {
-  user: { id: string; name: string };
-  tenant: { name: string };
-  deviceId: string | null;
-}
-
-/** Milestone 1 end state: an enrolled till with a signed-in cashier. Checkout arrives in Milestone 2. */
+/** The till frame: who is on, which register, the tabs, and the manager-approval dialog. */
 @Component({
   selector: 'pos-till',
   changeDetection: ChangeDetectionStrategy.OnPush,
+  imports: [RouterOutlet, RouterLink, RouterLinkActive, ApprovalDialog],
   template: `
     <div class="till">
       <header class="bar">
-        <div><strong>{{ me.value()?.tenant?.name }}</strong> <span class="muted">· {{ session.device()?.name }}</span></div>
+        <div class="who">
+          <strong>{{ state.tenantName() }}</strong>
+          <span class="muted">· {{ session.device()?.name }}</span>
+          @if (state.shiftOpen()) {
+            <span class="pill ok" data-testid="shift-open">Shift open</span>
+          } @else if (state.loaded()) {
+            <span class="pill warn">No shift</span>
+          }
+          @if (bridge.ready()) {
+            <span class="pill" title="Receipt printer connected">Printer</span>
+          }
+        </div>
+        <nav class="tabs">
+          <a routerLink="/till" routerLinkActive="active" [routerLinkActiveOptions]="{ exact: true }">Sell</a>
+          <a routerLink="/till/sales" routerLinkActive="active" data-testid="tab-sales">Sales</a>
+          <a routerLink="/till/refund" routerLinkActive="active" data-testid="tab-refund">Refund</a>
+          <a routerLink="/till/shift" routerLinkActive="active" data-testid="tab-shift">Shift</a>
+        </nav>
         <div class="row">
-          <span data-testid="cashier">{{ me.value()?.user?.name }}</span>
+          <span data-testid="cashier">{{ state.cashier()?.name }}</span>
           <button class="btn" type="button" (click)="lock()">Lock</button>
         </div>
       </header>
-      <main class="ready">
-        <div class="mark" aria-hidden="true">✓</div>
-        <h1 data-testid="till-ready">Till ready</h1>
-        <p class="muted">Signed in as {{ me.value()?.user?.name ?? '…' }} on a verified device. Selling arrives with the checkout module.</p>
-      </main>
+      @if (state.error()) {
+        <div class="banner" role="alert">
+          {{ errorText() }} <button class="btn small" type="button" (click)="state.load()">Retry</button>
+        </div>
+      }
+      <main><router-outlet /></main>
     </div>
+    <pos-approval-dialog />
   `,
   styles: `
-    .till { min-height: 100vh; display: flex; flex-direction: column; }
-    .bar { display: flex; justify-content: space-between; align-items: center; padding: var(--s3) var(--s5); background: var(--surface); border-bottom: 1px solid var(--border); }
-    .ready { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: var(--s5); }
-    .mark { width: 72px; height: 72px; border-radius: 50%; display: grid; place-items: center; background: var(--ok-soft); color: var(--ok); font-size: 36px; margin-bottom: var(--s4); }
+    .till { height: 100vh; display: flex; flex-direction: column; }
+    .bar { display: flex; justify-content: space-between; align-items: center; gap: var(--s3); padding: var(--s2) var(--s4); background: var(--surface); border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+    .who { display: flex; gap: var(--s2); align-items: center; flex-wrap: wrap; }
+    .pill { font-size: 12px; padding: 2px 8px; border-radius: 999px; background: var(--surface-2); color: var(--text-2); }
+    .pill.ok { background: var(--ok-soft); color: var(--ok); }
+    .pill.warn { background: var(--warn-soft); color: var(--warn); }
+    .tabs { display: flex; gap: var(--s1); }
+    .tabs a { padding: var(--s2) var(--s4); border-radius: var(--radius); text-decoration: none; color: var(--text-2); font-weight: 600; }
+    .tabs a.active { background: var(--accent-soft); color: var(--accent); }
+    .banner { background: var(--danger-soft); color: var(--danger); padding: var(--s2) var(--s4); }
+    main { flex: 1; min-height: 0; overflow: auto; }
   `,
 })
-export class Till {
+export class Till implements OnInit {
   protected readonly session = inject(PosSession);
-  private readonly http = inject(HttpClient);
+  protected readonly state = inject(TillState);
+  protected readonly bridge = inject(HardwareBridge);
   private readonly router = inject(Router);
-  protected readonly me = apiResource({ loader: () => firstValueFrom(this.http.get<Me>('/api/me')) });
+
+  ngOnInit() {
+    void this.state.load();
+    void this.bridge.check();
+  }
+
+  protected errorText() {
+    return humanMessage(toApiError(this.state.error()));
+  }
 
   protected async lock() {
     await this.session.lock().catch(() => undefined);
+    this.state.reset();
     await this.router.navigateByUrl('/pin');
   }
 }

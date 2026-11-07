@@ -9,6 +9,7 @@ Multi-tenant, zero-trust point-of-sale SaaS. Design: `docs/superpowers/specs/202
 | `backend/` | NestJS 12 API (ESM), Prisma 7, PostgreSQL 16 with row-level security |
 | `shared/` | Types, Zod schemas, module and permission registries shared by API and apps |
 | `frontend/` | Angular 22 workspace: `admin` (super-admin console + tenant back office), `pos` (till PWA), `ui` (shared components) |
+| `hardware-bridge/` | Local service on each till: ESC/POS receipts, cash drawer, scale; obeys only its paired device |
 | `infra/` | Docker Compose: Postgres, Redis, Caddy edge |
 | `docs/` | Specs and implementation plans |
 
@@ -40,6 +41,11 @@ printed, enrol your authenticator, create a tenant, and open the setup link it s
 adds a store, a register, a cashier with a PIN, and an enrollment code under Devices; enter that code
 on the till.
 
+Receipt printer (optional): on the till computer run `npm run dev:bridge` (prints to the console) or copy
+`hardware-bridge/bridge.config.example.json` to `bridge.config.json` with your printer and run
+`node hardware-bridge/dist/main.js`. Pair it from the till's Shift tab with the 6-digit code the bridge prints.
+Without a bridge the till prints through the browser.
+
 Optional TLS edge (Caddy, internal CA): `docker compose -f infra/docker-compose.yml --profile edge up -d caddy`.
 It forwards `/api` to :3000, `/pos/*` to :4201 and the rest to :4200; start the dev servers with
 `-- --host 0.0.0.0` so the container can reach them.
@@ -47,11 +53,12 @@ It forwards `/api` to :3000, `/pos/*` to :4201 and the rest to :4200; start the 
 ## Test
 
     npm test            # shared + backend + frontend unit tests (needs infra:up)
-    npm run e2e         # Playwright: the whole Milestone 1 flow in a browser against the real API
+    npm run e2e         # Playwright: each milestone's flow in a browser against the real API
 
 The backend suite runs against the `pos_test` database and Redis DB 1. Notable suites:
 `rls.spec.ts` (database-level isolation and the "every tenantId table has RLS" guard),
-`leakage.e2e.spec.ts` (API-level cross-tenant isolation), `audit.spec.ts` (tamper-evident log).
+`leakage.e2e.spec.ts` (API-level cross-tenant isolation), `audit.spec.ts` (tamper-evident log),
+`pos.e2e.spec.ts` (selling, approvals, refunds, shifts). The pricing engine's tests are in `shared/src/pricing.spec.ts`.
 
 The E2E suite (`frontend/e2e`) uses the dev database with fresh slugs per run, creates its own super
 admin through the real CLI, and starts the API and both dev servers if they are not already running.

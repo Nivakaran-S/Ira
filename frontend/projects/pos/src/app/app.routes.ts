@@ -10,6 +10,16 @@ export const routes: Routes = [
   { path: '', pathMatch: 'full', redirectTo: 'till' },
   { path: 'enroll', title: 'Set up till', canActivate: [notEnrolled], loadComponent: () => import('./screens/enroll').then((m) => m.Enroll) },
   { path: 'pin', title: 'Sign in', canActivate: [enrolled], loadComponent: () => import('./screens/pin').then((m) => m.Pin) },
-  { path: 'till', title: 'Till', canActivate: [enrolled, cashier], loadComponent: () => import('./screens/till').then((m) => m.Till) },
+  {
+    path: 'till',
+    canActivate: [enrolled, cashier],
+    loadComponent: () => import('./screens/till').then((m) => m.Till),
+    children: [
+      { path: '', title: 'Till', loadComponent: () => import('./screens/sell').then((m) => m.Sell) },
+      { path: 'sales', title: 'Sales', loadComponent: () => import('./screens/sales-history').then((m) => m.SalesHistory) },
+      { path: 'refund', title: 'Refund', loadComponent: () => import('./screens/refund').then((m) => m.Refund) },
+      { path: 'shift', title: 'Shift', loadComponent: () => import('./screens/shift').then((m) => m.Shift) },
+    ],
+  },
   { path: '**', redirectTo: 'till' },
 ];
