@@ -17,7 +17,7 @@ import { CapabilitiesService } from '../access/capabilities.service.js';
 import type { auditContext } from '../audit/audit-context.js';
 import { AuditService } from '../audit/audit.service.js';
 import { storePrices, taxStack } from '../catalog/catalog.service.js';
-import { type Approval, approvalNeeds, appliedPromotions, SalesService, settlePayments } from '../sales/sales.service.js';
+import { type Approval, approvalNeeds, appliedPromotions, checkTenderRules, SalesService, settlePayments } from '../sales/sales.service.js';
 import { ShiftsService } from '../sales/shifts.service.js';
 import { SettingsService } from '../settings/settings.service.js';
 
@@ -43,6 +43,8 @@ export interface Waivers {
   approvals?: boolean;
   prices?: boolean;
   method?: boolean;
+  /** Points or store credit spent beyond the balance (another till spent them meanwhile). */
+  balances?: boolean;
 }
 
 const sameTaxes = (a: TaxRateDef[], b: TaxRateDef[]) =>
@@ -70,13 +72,24 @@ export class SyncService {
   async down(tenant: TenantContext, device: { id: string; registerId: string }, cursor: bigint, blockNext?: number) {
     const [profile, modules] = await Promise.all([this.settings.profile(tenant.id), this.capabilities.modulesFor(tenant)]);
     const data = await this.tenantDb.run(tenant.id, async (tx) => {
-      const [barcodes, promotions, modifierGroups] = await Promise.all([
+      const [barcodes, promotions, modifierGroups, customers] = await Promise.all([
         modules.includes('barcodes') ? tx.barcode.findMany({ where: { version: { gt: cursor } }, select: { code: true, productId: true, version: true } }) : [],
         modules.includes('promotions') ? tx.promotion.findMany({ where: { version: { gt: cursor } } }) : [],
         modules.includes('modifiers')
           ? tx.modifierGroup.findMany({ where: { version: { gt: cursor } }, include: { options: { orderBy: { position: 'asc' } } } })
           : [],
+        modules.includes('customers')
+          ? tx.customer.findMany({ where: { version: { gt: cursor } }, select: { id: true, name: true, phoneLast4: true, version: true }, orderBy: { version: 'asc' } })
+          : [],
       ]);
+      const ids = customers.map((c) => c.id);
+      const [points, credit] = ids.length
+        ? await Promise.all([
+            tx.loyaltyLedger.groupBy({ by: ['customerId'], where: { customerId: { in: ids } }, _sum: { delta: true } }),
+            tx.storeCreditLedger.groupBy({ by: ['customerId'], where: { customerId: { in: ids } }, _sum: { delta: true } }),
+          ])
+        : [[], []];
+      const sum = (rows: { customerId: string; _sum: { delta: number | null } }[], id: string) => rows.find((r) => r.customerId === id)?._sum.delta ?? 0;
       const [register, dev, categories, products, groups, shift] = await Promise.all([
         tx.register.findUniqueOrThrow({ where: { id: device.registerId }, include: { store: { select: { id: true, name: true, code: true } } } }),
         tx.device.findUniqueOrThrow({ where: { id: device.id } }),
@@ -95,6 +108,7 @@ export class SyncService {
       const versions = [
         cursor, ...categories.map((c) => c.version), ...products.map((p) => p.version), ...groups.map((g) => g.version),
         ...barcodes.map((b) => b.version), ...promotions.map((p) => p.version), ...modifierGroups.map((g) => g.version),
+        ...customers.map((c) => c.version),
       ];
       const prices = await storePrices(tx, device.registerId);
       const links = products.length
@@ -105,6 +119,7 @@ export class SyncService {
         ? await tx.barcode.findMany({ where: { productId: { in: products.map((p) => p.id) } }, select: { code: true, productId: true } })
         : [];
       return {
+        customers: customers.map((c) => ({ id: c.id, name: c.name, phoneLast4: c.phoneLast4, points: sum(points, c.id), credit: sum(credit, c.id) })),
         register, block, categories, products: products.map((p) => ({ ...p, price: prices.get(p.id) ?? p.price })), groups, users, barcodes: [...barcodes, ...productBarcodes], promotions, modifierGroups, links,
         shift: shift ? await this.shifts.report(tx, shift.id) : null,
         next: versions.reduce((m, v) => (v > m ? v : m), cursor),
@@ -137,6 +152,8 @@ export class SyncService {
       /** code → productId; a product listed in `products` sends all its codes (replace, not merge). */
       barcodes: data.barcodes.map((b) => ({ code: b.code, productId: b.productId })),
       promotions: data.promotions.map(toDef),
+      /** Name, last four digits and balances only: customers changed (or whose balance changed) since the cursor. */
+      customers: data.customers,
       taxGroups: data.groups.map((g) => ({ id: g.id, name: g.name, rates: taxStack(g) })),
     };
   }
@@ -226,14 +243,23 @@ export class SyncService {
 
   private async alreadyHave(tx: Tx, deviceId: string, op: OfflineOp) {
     const id = op.payload.id;
-    const [found, quarantined] = await Promise.all([
-      op.kind === 'sale'
-        ? tx.sale.count({ where: { id } })
-        : op.kind === 'refund'
-          ? tx.refund.count({ where: { id } })
-          : tx.cashMovement.count({ where: { id } }),
-      tx.syncQuarantine.count({ where: { deviceId, opId: id } }),
-    ]);
+    const applied = () => {
+      switch (op.kind) {
+        case 'sale':
+          return tx.sale.count({ where: { id } });
+        case 'refund':
+          return tx.refund.count({ where: { id } });
+        case 'cash':
+          return tx.cashMovement.count({ where: { id } });
+        case 'void':
+          return tx.sale.count({ where: { voidOpId: id } });
+        case 'shift_open':
+          return tx.shift.count({ where: { id } });
+        case 'shift_close':
+          return tx.shift.count({ where: { closeOpId: id } });
+      }
+    };
+    const [found, quarantined] = await Promise.all([applied(), tx.syncQuarantine.count({ where: { deviceId, opId: id } })]);
     return found + quarantined > 0;
   }
 
@@ -266,6 +292,10 @@ export class SyncService {
     }
   }
 
+  private async requireUser(tx: Tx, userId: string) {
+    if (!(await tx.user.count({ where: { id: userId } }))) throw new Reject('UNKNOWN_USER', { userId });
+  }
+
   private async shiftFor(tx: Tx, device: { registerId: string }, shiftId: string) {
     const shift = await tx.shift.findUnique({ where: { id: shiftId } });
     if (!shift || shift.registerId !== device.registerId) throw new Reject('UNKNOWN_SHIFT', { shiftId });
@@ -289,11 +319,17 @@ export class SyncService {
       if (hours > settings.offline.maxHours) throw new Reject('OUTSIDE_OFFLINE_WINDOW', { createdAt: op.createdAt, lastContactAt: windowStart.toISOString(), maxHours: settings.offline.maxHours });
     }
     const auditCtx = { ...ctx, actorUserId: null };
+    const modules = await this.capabilities.modulesFor({ id: tenantId, businessTypeId: await this.businessTypeOf(tenantId) });
 
     if (op.kind === 'sale') {
       const s = op.payload;
       const shift = await this.shiftFor(tx, device, s.shiftId);
-      if (!(await tx.user.count({ where: { id: s.cashierId } }))) throw new Reject('UNKNOWN_USER', { userId: s.cashierId });
+      await this.requireUser(tx, s.cashierId);
+      if (s.customerId) {
+        if (!modules.includes('customers')) throw new Reject('MODULE_DISABLED', { module: 'customers' });
+        if (!(await tx.customer.count({ where: { id: s.customerId } }))) throw new Reject('UNKNOWN_CUSTOMER', { customerId: s.customerId });
+      }
+      checkTenderRules(s.payments, s.customerId, modules, settings);
       const cv = BigInt(s.catalogVersion);
       const products = await tx.product.findMany({ where: { id: { in: [...new Set(s.lines.map((l) => l.productId))] } }, include: { taxGroup: { include: { rates: { orderBy: { position: 'asc' }, include: { rate: true } } } } } });
       const prices = await storePrices(tx, device.registerId);
@@ -302,7 +338,7 @@ export class SyncService {
       for (const l of s.lines) {
         const p = byId.get(l.productId);
         if (!p) throw new Reject('UNKNOWN_PRODUCT', { productId: l.productId });
-        if (p.rxRequired && (await this.capabilities.modulesFor({ id: tenantId, businessTypeId: await this.businessTypeOf(tenantId) })).includes('prescriptions')) {
+        if (p.rxRequired && modules.includes('prescriptions')) {
           throw new Reject('RX_NEEDS_ONLINE', { productId: p.id });
         }
         const groups = modGroups.get(p.id) ?? [];
@@ -318,7 +354,9 @@ export class SyncService {
           if (!sameTaxes(l.taxes, taxStack(p.taxGroup))) throw new Reject('TAX_MISMATCH', { productId: p.id });
         }
       }
-      if (!waive.method && !settings.offline.allowCard && s.payments.some((p) => p.method !== 'CASH')) throw new Reject('METHOD_NOT_ALLOWED_OFFLINE');
+      // Card payments approved by an integrated terminal are facts; keyed-in cards and other methods need allowCard.
+      const manual = s.payments.some((p) => (p.method === 'CARD' && !p.card) || p.method === 'OTHER');
+      if (!waive.method && !settings.offline.allowCard && manual) throw new Reject('METHOD_NOT_ALLOWED_OFFLINE');
       // Promotions: what the till applied must match the promotions it knew. If any promotion changed
       // after the till's snapshot, the till's version is the fact (like prices).
       const pricingLines = s.lines.map((l, i) => {
@@ -329,7 +367,7 @@ export class SyncService {
         lines: Object.fromEntries(s.lines.flatMap((l, i) => (l.promo ? [[String(i), [l.promo]]] : []))),
         cart: s.cartPromo ? [s.cartPromo] : [],
       };
-      const promoOn = (await this.capabilities.modulesFor({ id: tenantId, businessTypeId: await this.businessTypeOf(tenantId) })).includes('promotions');
+      const promoOn = modules.includes('promotions');
       if (!waive.prices) {
         const all = promoOn ? await tx.promotion.findMany() : [];
         const changed = all.some((p) => p.version > cv);
@@ -353,12 +391,13 @@ export class SyncService {
         id: s.id, storeId: shift.storeId, registerId: device.registerId, shiftId: shift.id, deviceId: device.id, cashierId: s.cashierId,
         receiptNo: s.receiptNo, pricesIncludeTax: settings.pricesIncludeTax, priced, due, payments, cartDiscount: s.cartDiscount,
         approvals: s.approvals, soldAt: at, offline: true, catalogVersion: cv, tip: s.tip,
-        batchesOn: (await this.capabilities.modulesFor({ id: tenantId, businessTypeId: await this.businessTypeOf(tenantId) })).includes('batch-expiry'),
+        customerId: s.customerId ?? null, loyalty: modules.includes('loyalty') ? settings.loyalty : null, allowOverdraw: !!waive.balances,
+        batchesOn: modules.includes('batch-expiry'),
         promotions: appliedPromotions(priced, new Map([...Object.values(applied.lines).flat(), ...applied.cart].map((a) => [a.label, a.promotionId]))),
         lines: s.lines.map((l) => {
           const p = byId.get(l.productId)!;
           return {
-            productId: p.id, name: p.name, sku: p.sku, unitPrice: l.unitPrice, listPrice: l.listPrice, qtyMilli: l.qtyMilli, note: l.note, trackStock: p.trackStock,
+            id: l.id, productId: p.id, name: p.name, sku: p.sku, unitPrice: l.unitPrice, listPrice: l.listPrice, qtyMilli: l.qtyMilli, note: l.note, trackStock: p.trackStock,
             modifiers: l.modifiers ?? [], tracksBatches: p.tracksBatches, unitCost: p.costPrice,
           };
         }),
@@ -372,6 +411,7 @@ export class SyncService {
       const sale = await this.sales.getSale(tx, r.saleId);
       if (!sale) throw new Reject('UNKNOWN_SALE', { saleId: r.saleId });
       if (sale.status !== 'COMPLETED') throw new Reject('SALE_VOIDED');
+      if (r.method === 'STORE_CREDIT' && !sale.customerId) throw new Reject('NO_CUSTOMER_FOR_CREDIT');
       const lines = this.sales.refundLines(sale, r);
       const total = lines.reduce((s, l) => s + l.total, 0);
       if (!waive.window && total > settings.offline.maxRefund) throw new Reject('OVER_OFFLINE_REFUND_LIMIT', { total, limit: settings.offline.maxRefund });
@@ -385,7 +425,45 @@ export class SyncService {
         approvedById: r.approvals.find((a) => a.action === 'sale.refund')?.approverId ?? null, receiptNo: r.receiptNo, method: r.method,
         reason: r.reason, restock: r.restock, lines, total, taxTotal: lines.reduce((s, l) => s + l.tax, 0),
         paidOut: r.method === 'CASH' ? cashRound(total, settings.cashRoundingUnit) : total, offline: true, checkDrawer: false,
+        card: r.method === 'CARD' ? (r.card ?? null) : null,
       }, { ...auditCtx, actorUserId: r.userId });
+      return;
+    }
+
+    if (op.kind === 'void') {
+      const v = op.payload;
+      await this.requireUser(tx, v.userId);
+      const sale = await this.sales.getSale(tx, v.saleId);
+      if (!sale) throw new Reject('UNKNOWN_SALE', { saleId: v.saleId });
+      if (sale.status !== 'COMPLETED') throw new Reject('ALREADY_VOIDED');
+      const shift = await this.shiftFor(tx, device, sale.shiftId);
+      if (shift.status !== 'OPEN' && !waive.window) throw new Reject('SHIFT_CLOSED', { shiftId: shift.id });
+      if (!waive.approvals) await this.checkApprovals(tenantId, [{ action: 'sale.void' }], v.approvals);
+      await this.sales.persistVoid(tx, tenantId, sale, {
+        saleId: sale.id, userId: v.userId, reason: v.reason, approverId: v.approvals.find((a) => a.action === 'sale.void')?.approverId ?? null, at, opId: v.id,
+      }, { ...auditCtx, actorUserId: v.userId });
+      return;
+    }
+
+    if (op.kind === 'shift_open') {
+      const o = op.payload;
+      await this.requireUser(tx, o.userId);
+      await this.shifts.openWith(tx, tenantId, { id: o.id, registerId: device.registerId, userId: o.userId, openingFloat: o.openingFloat, at, offline: true }, { ...auditCtx, actorUserId: o.userId });
+      return;
+    }
+
+    if (op.kind === 'shift_close') {
+      const c = op.payload;
+      await this.requireUser(tx, c.userId);
+      const shift = await this.shiftFor(tx, device, c.shiftId);
+      if (shift.status !== 'OPEN') throw new Reject('SHIFT_ALREADY_CLOSED', { shiftId: shift.id });
+      if (!waive.approvals) {
+        const holds = (await this.capabilities.permissionsFor(tenantId, c.userId)).has('shift.close');
+        await this.checkApprovals(tenantId, holds ? [] : [{ action: 'shift.close' }], c.approvals);
+      }
+      await this.shifts.closeWith(tx, tenantId, shift.id, {
+        userId: c.userId, countedCash: c.countedCash, note: c.note, approvedById: c.approvals[0]?.approverId ?? null, at, opId: c.id,
+      }, { ...auditCtx, actorUserId: c.userId });
       return;
     }
 
@@ -433,7 +511,7 @@ export class SyncService {
       const op = q.op as unknown as OfflineOp;
       try {
         await tx.$executeRaw`SAVEPOINT accept_op`;
-        await this.apply(tx, tenant.id, { id: q.deviceId, registerId: q.registerId }, op, settings, new Date(0), { window: true, approvals: true, prices: true, method: true }, ctx);
+        await this.apply(tx, tenant.id, { id: q.deviceId, registerId: q.registerId }, op, settings, new Date(0), { window: true, approvals: true, prices: true, method: true, balances: true }, ctx);
       } catch (e) {
         const reject = this.asReject(e);
         if (!reject) throw e;

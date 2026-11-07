@@ -60,7 +60,7 @@ export class ReceiptsService {
       due: sale.due,
       change: sale.change,
       taxes: (sale.taxes as { name: string; rateBp: number; amount: number }[]) ?? [],
-      payments: sale.payments,
+      payments: sale.payments.map((p) => ({ ...p, card: p.card as { scheme: string; last4: string; authCode: string } | null })),
       promotions: (sale.promotions as { label: string; amount: number }[]) ?? [],
       customerName: customer?.name ?? null,
       pointsEarned: sale.loyaltyEarned,

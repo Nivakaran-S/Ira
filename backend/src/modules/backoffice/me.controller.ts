@@ -3,7 +3,9 @@ import { AppError } from '../../common/errors/app-error.js';
 import type { RequestWithContext } from '../../common/request-context.js';
 import { TenantDb } from '../../infra/tenant-db.service.js';
 import { CapabilitiesService } from '../access/capabilities.service.js';
+import { AllowWhenBillingSuspended } from '../access/decorators.js';
 
+@AllowWhenBillingSuspended()
 @Controller('me')
 export class MeController {
   constructor(
@@ -21,7 +23,7 @@ export class MeController {
     if (!user) throw AppError.unauthenticated();
     return {
       user,
-      tenant: { id: tenant.id, name: tenant.name, slug: tenant.slug },
+      tenant: { id: tenant.id, name: tenant.name, slug: tenant.slug, status: tenant.status, suspendedReason: tenant.suspendedReason ?? null },
       impersonatedBy: p.impersonatorId ?? null,
       deviceId: p.deviceId ?? null,
     };

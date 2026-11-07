@@ -4,10 +4,12 @@ import { type DevicePublicJwk, type PairingCode, type PairingStore, SignatureVer
 import type { Printer } from './devices.js';
 import { DRAWER_KICK, receiptText, renderReceipt } from './escpos.js';
 import type { Scale } from './scale.js';
+import { type CardTerminal, parseTerminalRequest } from './terminal.js';
 
 export interface BridgeOptions {
   printer: Printer | null;
   scale: Scale | null;
+  terminal?: CardTerminal | null;
   pairing: PairingStore;
   pairingCode: PairingCode;
   /** Exact origins allowed to call the bridge; empty = any (signatures still required). */
@@ -83,6 +85,7 @@ export function createBridgeServer(opts: BridgeOptions): Server {
           paired: opts.pairing.get()?.deviceId ?? null,
           printer: opts.printer ? opts.printer.kind : null,
           scale: opts.scale ? opts.scale.kind : null,
+          terminal: opts.terminal ? opts.terminal.kind : null,
         });
       }
 
@@ -132,6 +135,21 @@ export function createBridgeServer(opts: BridgeOptions): Server {
       if (req.method === 'GET' && url.pathname === '/scale/weight') {
         if (!opts.scale) return send(res, 503, { code: 'NO_SCALE' });
         return send(res, 200, await opts.scale.read());
+      }
+
+      if (req.method === 'POST' && (url.pathname === '/terminal/sale' || url.pathname === '/terminal/refund')) {
+        if (!opts.terminal) return send(res, 503, { code: 'NO_TERMINAL' });
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(body.toString('utf8'));
+        } catch {
+          return send(res, 400, { code: 'VALIDATION_FAILED' });
+        }
+        const input = parseTerminalRequest(parsed);
+        if (!input) return send(res, 400, { code: 'VALIDATION_FAILED', message: 'amount, currency and reference required' });
+        const result = url.pathname === '/terminal/sale' ? await opts.terminal.sale(input) : await opts.terminal.refund(input);
+        log(`terminal ${url.pathname.slice(10)} ${input.reference}: ${result.status}`);
+        return send(res, 200, result);
       }
 
       return send(res, 404, { code: 'NOT_FOUND' });

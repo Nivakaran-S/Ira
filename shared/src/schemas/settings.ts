@@ -28,7 +28,7 @@ export const TenantSettingsSchema = z.object({
       maxHours: z.int().min(1).max(168).default(24),
       /** Largest refund a till may give offline (minor units). 0 = no offline refunds. */
       maxRefund: z.int().min(0).default(0),
-      /** Card payments offline (only with a terminal that works offline). */
+      /** Keyed-in card and other payments offline. Cards charged on an integrated terminal are always accepted. */
       allowCard: z.boolean().default(false),
     })
     .prefault({}),

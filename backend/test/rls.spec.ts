@@ -4,7 +4,7 @@ import { appDb, ownerDb, resetDb } from './helpers/db.js';
 import { createStore, createTenant } from './helpers/fixtures.js';
 
 /** Platform tables that carry tenantId on purpose and are read before tenant context exists. */
-const PLATFORM_TABLES_WITH_TENANT_ID = ['Domain', 'TenantModule', 'Invoice'];
+const PLATFORM_TABLES_WITH_TENANT_ID = ['Domain', 'TenantModule', 'Invoice', 'BillingPayment'];
 
 const app = appDb();
 afterAll(() => app.$disconnect());

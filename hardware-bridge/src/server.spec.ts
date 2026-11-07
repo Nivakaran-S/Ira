@@ -7,6 +7,7 @@ import { MemoryPrinter } from './devices.js';
 import { renderReceipt, twoCol, wrap } from './escpos.js';
 import { FixedScale } from './scale.js';
 import { createBridgeServer } from './server.js';
+import { SandboxTerminal } from './terminal.js';
 
 const receipt: ReceiptDoc = {
   currency: 'LKR',
@@ -60,7 +61,7 @@ describe('bridge server', () => {
     printer = new MemoryPrinter(32);
     code = new PairingCode();
     const server = createBridgeServer({
-      printer, scale: new FixedScale(1234), pairing: new PairingStore(null), pairingCode: code, allowedOrigins: ['https://acme.pos.localhost'],
+      printer, scale: new FixedScale(1234), terminal: new SandboxTerminal(0), pairing: new PairingStore(null), pairingCode: code, allowedOrigins: ['https://acme.pos.localhost'],
     });
     await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
     base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -88,7 +89,7 @@ describe('bridge server', () => {
 
   it('reports health without a signature', async () => {
     const res = await fetch(`${base}/health`);
-    expect(await res.json()).toEqual({ ok: true, paired: null, printer: 'memory', scale: 'fixed' });
+    expect(await res.json()).toEqual({ ok: true, paired: null, printer: 'memory', scale: 'fixed', terminal: 'sandbox' });
   });
 
   it('refuses to print before pairing and with a wrong code', async () => {
@@ -111,6 +112,20 @@ describe('bridge server', () => {
     expect((await signed('POST', '/print', { receipt }, other.privateKey)).status).toBe(401);
     expect((await signed('POST', '/print', { receipt: { title: 1 } })).status).toBe(400);
     expect(await (await signed('GET', '/scale/weight')).json()).toEqual({ grams: 1234, stable: true });
+  });
+
+  it('charges and refunds on the terminal, once per reference, and declines amounts ending in 13', async () => {
+    expect((await signed('POST', '/terminal/sale', { amount: 1000, currency: 'LKR', reference: 'sale-0000001' })).status).toBe(401);
+    await pair(code.current());
+    const first = await (await signed('POST', '/terminal/sale', { amount: 1000, currency: 'LKR', reference: 'sale-0000001' })).json();
+    expect(first).toMatchObject({ status: 'APPROVED', amount: 1000, scheme: 'VISA', last4: '4242' });
+    expect(first.authCode).toMatch(/^\d{6}$/);
+    const again = await (await signed('POST', '/terminal/sale', { amount: 1000, currency: 'LKR', reference: 'sale-0000001' })).json();
+    expect(again).toEqual(first);
+    expect(await (await signed('POST', '/terminal/sale', { amount: 1013, currency: 'LKR', reference: 'sale-0000002' })).json()).toMatchObject({ status: 'DECLINED' });
+    const refund = await (await signed('POST', '/terminal/refund', { amount: 500, currency: 'LKR', reference: 'refund-00001', originalRef: first.terminalRef })).json();
+    expect(refund).toMatchObject({ status: 'APPROVED', amount: 500 });
+    expect((await signed('POST', '/terminal/sale', { amount: -5, currency: 'LKR', reference: 'sale-0000003' })).status).toBe(400);
   });
 
   it('burns the pairing code after five wrong guesses', async () => {

@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { PERMISSIONS } from './permissions.js';
-import { DiscountSchema, OFFLINE_PAYMENT_METHODS, PaymentInputSchema } from './schemas/sales.js';
+import { CardResultSchema, DiscountSchema, PaymentInputSchema, REFUND_METHODS } from './schemas/sales.js';
 
 /**
  * Offline operations. A till that cannot reach the API writes these to its outbox; each one is
@@ -34,11 +34,15 @@ export const OfflineSaleSchema = z.object({
   shiftId: z.uuid(),
   cashierId: z.uuid(),
   receiptNo: z.string().min(1).max(40),
+  /** Needs the customers module; points and store credit are checked against the balance when the op arrives. */
+  customerId: z.uuid().optional(),
   /** The down-sync cursor the till priced with (decimal string). */
   catalogVersion: z.string().regex(/^\d{1,19}$/),
   lines: z
     .array(
       z.object({
+        /** Chosen by the till so the sale can be refunded before it has synced. */
+        id: z.uuid().optional(),
         productId: z.uuid(),
         qtyMilli: z.int().min(1).max(100_000_000),
         unitPrice: z.int().min(0),
@@ -57,7 +61,7 @@ export const OfflineSaleSchema = z.object({
   cartDiscount: DiscountSchema.optional(),
   /** The spend-threshold promotion the till applied, if any. */
   cartPromo: z.object({ promotionId: z.uuid(), label: z.string().max(80), discount: DiscountSchema }).optional(),
-  payments: z.array(PaymentInputSchema.extend({ method: z.enum(OFFLINE_PAYMENT_METHODS) })).min(1).max(10),
+  payments: z.array(PaymentInputSchema).min(1).max(10),
   expectedTotal: z.int().min(0),
   tip: z.int().min(0).default(0),
   approvals: z.array(ApprovalSchema).max(5).default([]),
@@ -70,9 +74,35 @@ export const OfflineRefundSchema = z.object({
   userId: z.uuid(),
   receiptNo: z.string().min(1).max(40),
   lines: z.array(z.object({ saleLineId: z.uuid(), qtyMilli: z.int().min(1) })).min(1).max(500),
-  method: z.enum(OFFLINE_PAYMENT_METHODS),
+  method: z.enum(REFUND_METHODS),
   reason: z.string().trim().min(3).max(200),
   restock: z.boolean(),
+  card: CardResultSchema.optional(),
+  approvals: z.array(ApprovalSchema).max(5).default([]),
+});
+
+export const OfflineVoidSchema = z.object({
+  /** The op's own id; the sale is `saleId`. */
+  id: z.uuid(),
+  saleId: z.uuid(),
+  userId: z.uuid(),
+  reason: z.string().trim().min(3).max(200),
+  approvals: z.array(ApprovalSchema).max(5).default([]),
+});
+
+/** A shift opened offline: the till chooses its id, and later ops of that shift refer to it. */
+export const OfflineShiftOpenSchema = z.object({
+  id: z.uuid(),
+  userId: z.uuid(),
+  openingFloat: z.int().min(0).max(100_000_000_000),
+});
+
+export const OfflineShiftCloseSchema = z.object({
+  id: z.uuid(),
+  shiftId: z.uuid(),
+  userId: z.uuid(),
+  countedCash: z.int().min(0).max(100_000_000_000),
+  note: z.string().trim().max(500).optional(),
   approvals: z.array(ApprovalSchema).max(5).default([]),
 });
 
@@ -99,6 +129,9 @@ export const OfflineOpSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('sale'), payload: OfflineSaleSchema, ...chain }),
   z.object({ kind: z.literal('refund'), payload: OfflineRefundSchema, ...chain }),
   z.object({ kind: z.literal('cash'), payload: OfflineCashSchema, ...chain }),
+  z.object({ kind: z.literal('void'), payload: OfflineVoidSchema, ...chain }),
+  z.object({ kind: z.literal('shift_open'), payload: OfflineShiftOpenSchema, ...chain }),
+  z.object({ kind: z.literal('shift_close'), payload: OfflineShiftCloseSchema, ...chain }),
 ]);
 
 export type OfflineOp = z.infer<typeof OfflineOpSchema>;

@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import {
-  approvalNeeds, type BatchTake, cashRound, chooseModifiers, type CreateRefundSchema, type CreateSaleSchema, type Discount, type ModuleKey, type PaymentMethodKey, type Permission,
+  approvalNeeds, type BatchTake, type CardResult, cashRound, chooseModifiers, type CreateRefundSchema, type CreateSaleSchema, type Discount, type ModuleKey, type PaymentMethodKey, type Permission,
   pointsEarned, priceWithPromotions, type PricingResult, prorate, type TenantSettings, withModifiers,
 } from '@pos/shared';
 import { ModifiersService } from '../restaurant/modifiers.service.js';
@@ -73,6 +73,17 @@ export interface RefundRecord {
   offline: boolean;
   /** Online refunds check the drawer holds the cash; offline ones are facts already paid out. */
   checkDrawer: boolean;
+  card?: CardResult | null;
+}
+
+export interface VoidRecord {
+  saleId: string;
+  userId: string;
+  reason: string;
+  approverId: string | null;
+  at: Date;
+  /** The offline op that voided it. */
+  opId?: string | null;
 }
 
 export interface SettledPayment {
@@ -81,6 +92,7 @@ export interface SettledPayment {
   tendered: number | null;
   change: number;
   reference?: string;
+  card?: CardResult;
 }
 
 export interface SaleRecord {
@@ -112,7 +124,11 @@ export interface SaleRecord {
   rxValidDays?: number | null;
   /** Paying (part of) an open order: which order lines and how much of each. */
   orderPay?: { orderId: string; lines: { orderLineId: string; qtyMilli: number }[] } | null;
+  /** A manager accepted an offline sale that spent more points or credit than the customer had. */
+  allowOverdraw?: boolean;
   lines: {
+    /** Offline sales choose their line ids so they can be refunded before they sync. */
+    id?: string;
     productId: string; name: string; sku: string | null; unitPrice: number; listPrice: number; qtyMilli: number; note?: string; trackStock: boolean;
     modifiers?: { id: string; name: string; priceDelta: number }[]; orderLineId?: string | null;
     tracksBatches?: boolean; rxRequired?: boolean; prescriptionItemId?: string | null; unitCost?: number;
@@ -148,7 +164,7 @@ export function checkTenderRules(payments: { method: PaymentMethodKey; amount: n
 }
 
 /** Payments must add up to the amount due exactly; cash may be over-tendered and gives change. */
-export function settlePayments(payments: { method: PaymentMethodKey; amount: number; tendered?: number; reference?: string }[], due: number): SettledPayment[] {
+export function settlePayments(payments: { method: PaymentMethodKey; amount: number; tendered?: number; reference?: string; card?: CardResult }[], due: number): SettledPayment[] {
   const paid = payments.reduce((s, p) => s + p.amount, 0);
   if (paid !== due) throw new AppError('PAYMENT_MISMATCH', 400, 'Payments must add up to the amount due', { due, paid });
   return payments.map((p) => {
@@ -331,12 +347,12 @@ export class SalesService {
       if (pointsPaid) {
         const points = pointsPaid / (r.loyalty?.pointValue ?? 1);
         const have = await this.ledgers.balance(tx, 'loyalty', r.customerId);
-        if (have < points) throw new AppError('INVALID_STATE', 409, 'Not enough loyalty points', { balance: have, needed: points });
+        if (have < points && !r.allowOverdraw) throw new AppError('INVALID_STATE', 409, 'Not enough loyalty points', { balance: have, needed: points });
         await this.ledgers.add(tx, tenantId, 'loyalty', { customerId: r.customerId, delta: -points, reason: 'REDEEM', saleId: r.id, userId: r.cashierId });
       }
       if (creditPaid) {
         const have = await this.ledgers.balance(tx, 'credit', r.customerId);
-        if (have < creditPaid) throw new AppError('INVALID_STATE', 409, 'Not enough store credit', { balance: have, needed: creditPaid });
+        if (have < creditPaid && !r.allowOverdraw) throw new AppError('INVALID_STATE', 409, 'Not enough store credit', { balance: have, needed: creditPaid });
         await this.ledgers.add(tx, tenantId, 'credit', { customerId: r.customerId, delta: -creditPaid, reason: 'REDEEM', saleId: r.id, userId: r.cashierId });
       }
       if (r.loyalty) {
@@ -357,6 +373,7 @@ export class SalesService {
           create: r.priced.lines.map((l, i) => {
             const src = r.lines[i];
             return {
+              ...(src.id ? { id: src.id } : {}),
               position: i, productId: src.productId, name: src.name, sku: src.sku, unitPrice: src.unitPrice, listPrice: src.listPrice,
               qtyMilli: src.qtyMilli, gross: l.gross, discount: l.discount, discounts: json(l.discounts), net: l.net, tax: l.tax,
               taxes: json(l.taxes), total: l.total, note: src.note ?? null, modifiers: json(src.modifiers ?? []), orderLineId: src.orderLineId ?? null,
@@ -365,7 +382,7 @@ export class SalesService {
           }),
         },
         payments: {
-          create: r.payments.map((p) => ({ method: p.method, amount: p.amount, tendered: p.tendered, change: p.change, reference: p.reference ?? null })),
+          create: r.payments.map((p) => ({ method: p.method, amount: p.amount, tendered: p.tendered, change: p.change, reference: p.reference ?? null, card: p.card ? json(p.card) : Prisma.DbNull })),
         },
       },
     });
@@ -413,39 +430,42 @@ export class SalesService {
     return this.tenantDb.run(tenant.id, async (tx) => {
       const sale = await this.getSale(tx, saleId);
       if (!sale) throw AppError.notFound('Sale not found');
-      if (sale.status !== 'COMPLETED') throw new AppError('INVALID_STATE', 409, 'This sale is already voided');
-      if (sale.refunds.length) throw new AppError('INVALID_STATE', 409, 'A sale with refunds cannot be voided; refund the rest instead');
       const shift = await this.shifts.requireOpenShift(tx, device.registerId);
       if (sale.shiftId !== shift.id) throw new AppError('INVALID_STATE', 409, 'Only sales from the current shift on this register can be voided');
-
-      await tx.sale.update({ where: { id: saleId }, data: { status: 'VOIDED', voidedAt: new Date(), voidedById: req.principal!.userId, voidReason: reason } });
-      if (sale.customerId) {
-        // Undo everything the sale did to the customer's balances.
-        const userId = req.principal!.userId;
-        await this.ledgers.lock(tx, sale.customerId);
-        for (const kind of ['loyalty', 'credit'] as const) {
-          const redeemed = await this.ledgers.sumFor(tx, kind, sale.id, 'REDEEM');
-          await this.ledgers.add(tx, tenant.id, kind, { customerId: sale.customerId, delta: -redeemed, reason: 'RESTORE', saleId: sale.id, userId, note: 'Sale voided' });
-        }
-        await this.ledgers.add(tx, tenant.id, 'loyalty', { customerId: sale.customerId, delta: -sale.loyaltyEarned, reason: 'REVERSE', saleId: sale.id, userId, note: 'Sale voided' });
-      }
-      const tracked = await tx.product.findMany({ where: { id: { in: sale.lines.map((l) => l.productId) }, trackStock: true }, select: { id: true } });
-      const trackedIds = new Set(tracked.map((p) => p.id));
-      for (const l of sale.lines) {
-        const takes = (l.batches as unknown as BatchTake[]) ?? [];
-        if (takes.length) await this.batches.giveBack(tx, takes, l.qtyMilli);
-      }
-      await this.inventory.apply(
-        tx, tenant.id,
-        sale.lines.filter((l) => trackedIds.has(l.productId)).map((l) => ({
-          storeId: sale.storeId, productId: l.productId, deltaMilli: l.qtyMilli, reason: 'VOID', refType: 'Sale', refId: sale.id, userId: req.principal!.userId,
-        })),
-      );
-      await this.audit.record(tx, tenant.id, {
-        ...auditContext(req), action: 'sale.voided', entityType: 'Sale', entityId: sale.id,
-        before: { status: 'COMPLETED' }, after: { status: 'VOIDED', reason, approverId },
-      });
+      await this.persistVoid(tx, tenant.id, sale, { saleId, userId: req.principal!.userId, reason, approverId, at: new Date() }, auditContext(req));
       return (await this.getSale(tx, saleId))!;
+    });
+  }
+
+  /** Marks a sale voided and undoes what it did: balances, lots and stock. */
+  async persistVoid(tx: Tx, tenantId: string, sale: SaleWithLines, v: VoidRecord, ctx: Partial<AuditEntry>) {
+    if (sale.status !== 'COMPLETED') throw new AppError('INVALID_STATE', 409, 'This sale is already voided');
+    if (sale.refunds.length) throw new AppError('INVALID_STATE', 409, 'A sale with refunds cannot be voided; refund the rest instead');
+    await tx.sale.update({ where: { id: sale.id }, data: { status: 'VOIDED', voidedAt: v.at, voidedById: v.userId, voidReason: v.reason, voidOpId: v.opId ?? null } });
+    if (sale.customerId) {
+      // Undo everything the sale did to the customer's balances.
+      await this.ledgers.lock(tx, sale.customerId);
+      for (const kind of ['loyalty', 'credit'] as const) {
+        const redeemed = await this.ledgers.sumFor(tx, kind, sale.id, 'REDEEM');
+        await this.ledgers.add(tx, tenantId, kind, { customerId: sale.customerId, delta: -redeemed, reason: 'RESTORE', saleId: sale.id, userId: v.userId, note: 'Sale voided' });
+      }
+      await this.ledgers.add(tx, tenantId, 'loyalty', { customerId: sale.customerId, delta: -sale.loyaltyEarned, reason: 'REVERSE', saleId: sale.id, userId: v.userId, note: 'Sale voided' });
+    }
+    const tracked = await tx.product.findMany({ where: { id: { in: sale.lines.map((l) => l.productId) }, trackStock: true }, select: { id: true } });
+    const trackedIds = new Set(tracked.map((p) => p.id));
+    for (const l of sale.lines) {
+      const takes = (l.batches as unknown as BatchTake[]) ?? [];
+      if (takes.length) await this.batches.giveBack(tx, takes, l.qtyMilli);
+    }
+    await this.inventory.apply(
+      tx, tenantId,
+      sale.lines.filter((l) => trackedIds.has(l.productId)).map((l) => ({
+        storeId: sale.storeId, productId: l.productId, deltaMilli: l.qtyMilli, reason: 'VOID', refType: 'Sale', refId: sale.id, userId: v.userId,
+      })),
+    );
+    await this.audit.record(tx, tenantId, {
+      ...ctx, action: 'sale.voided', entityType: 'Sale', entityId: sale.id,
+      before: { status: 'COMPLETED' }, after: { status: 'VOIDED', reason: v.reason, approverId: v.approverId, ...(v.opId ? { offline: true } : {}) },
     });
   }
 
@@ -478,7 +498,7 @@ export class SalesService {
       return this.persistRefund(tx, tenant.id, {
         id: input.id, saleId: sale.id, storeId: shift.storeId, registerId: device.registerId, shiftId: shift.id, deviceId: device.id,
         userId, approvedById, receiptNo, method: input.method, reason: input.reason, restock: input.restock, lines, total, taxTotal, paidOut,
-        offline: false, checkDrawer: true,
+        offline: false, checkDrawer: true, card: input.method === 'CARD' ? (input.card ?? null) : null,
       }, auditContext(req));
     });
   }
@@ -501,7 +521,7 @@ export class SalesService {
       data: {
         id: r.id, tenantId, saleId: r.saleId, storeId: r.storeId, registerId: r.registerId, shiftId: r.shiftId,
         deviceId: r.deviceId, userId: r.userId, approvedById: r.approvedById, receiptNo: r.receiptNo, method: r.method, reason: r.reason,
-        restock: r.restock, total: r.total, taxTotal: r.taxTotal, rounding: r.paidOut - r.total, offline: r.offline,
+        restock: r.restock, total: r.total, taxTotal: r.taxTotal, rounding: r.paidOut - r.total, offline: r.offline, card: r.card ? json(r.card) : Prisma.DbNull,
         lines: { create: r.lines.map((l) => ({ saleLineId: l.saleLineId, qtyMilli: l.qtyMilli, net: l.net, tax: l.tax, total: l.total })) },
       },
       include: { lines: true },

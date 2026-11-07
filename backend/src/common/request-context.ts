@@ -7,6 +7,8 @@ export interface TenantContext {
   name: string;
   slug: string;
   status: 'ACTIVE' | 'SUSPENDED';
+  /** 'billing' when suspended for an unpaid invoice. */
+  suspendedReason?: string | null;
   businessTypeId: string;
   planId: string;
 }

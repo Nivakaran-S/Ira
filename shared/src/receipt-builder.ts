@@ -26,7 +26,7 @@ export interface SaleReceiptInput {
   due: number;
   change: number;
   taxes: { name: string; rateBp: number; amount: number }[];
-  payments: { method: string; amount: number; tendered?: number | null }[];
+  payments: { method: string; amount: number; tendered?: number | null; card?: { scheme: string; last4: string; authCode: string } | null }[];
   /** Promotions applied (already included in discountTotal), shown by name. */
   promotions?: { label: string; amount: number }[];
   customerName?: string | null;
@@ -82,7 +82,10 @@ export function buildSaleReceipt(s: SaleReceiptInput): ReceiptDoc {
     totals,
     taxes: s.showTaxBreakdown ? s.taxes.map((t) => ({ label: `${t.name} ${pct(t.rateBp)}${s.pricesIncludeTax ? ' (incl.)' : ''}`, value: m(t.amount) })) : [],
     payments: [
-      ...s.payments.map((p) => ({ label: METHOD_LABEL[p.method] ?? p.method, value: m(p.tendered ?? p.amount) })),
+      ...s.payments.flatMap((p) => [
+        { label: `${METHOD_LABEL[p.method] ?? p.method}${p.card ? ` ${p.card.scheme} ****${p.card.last4}` : ''}`, value: m(p.tendered ?? p.amount) },
+        ...(p.card ? [{ label: '  Approval', value: p.card.authCode }] : []),
+      ]),
       ...(s.change ? [{ label: 'Change', value: m(s.change) }] : []),
     ],
     footer: [

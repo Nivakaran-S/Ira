@@ -38,7 +38,7 @@ export class TenantResolverService {
   }
 
   private async lookup(host: string): Promise<TenantContext | null> {
-    const select = { id: true, name: true, slug: true, status: true, businessTypeId: true, planId: true, deletedAt: true } as const;
+    const select = { id: true, name: true, slug: true, status: true, suspendedReason: true, businessTypeId: true, planId: true, deletedAt: true } as const;
     let row: (TenantContext & { deletedAt: Date | null }) | null = null;
     if (host.endsWith(`.${this.base}`)) {
       const slug = host.slice(0, -(this.base.length + 1));

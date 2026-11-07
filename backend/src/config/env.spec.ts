@@ -21,6 +21,18 @@ describe('loadEnv', () => {
     expect(loadEnv({ ...valid, PLATFORM_IP_ALLOWLIST: '1.2.3.4, 5.6.7.8' }).PLATFORM_IP_ALLOWLIST).toEqual(['1.2.3.4', '5.6.7.8']);
   });
 
+  it('uses the sandbox billing gateway outside production and refuses it in production', () => {
+    expect(loadEnv(valid).BILLING_GATEWAY).toBe('sandbox');
+    expect(loadEnv({ ...valid, NODE_ENV: 'production' }).BILLING_GATEWAY).toBe('none');
+    expect(() => loadEnv({ ...valid, NODE_ENV: 'production', BILLING_GATEWAY: 'sandbox' })).toThrowError(/BILLING_GATEWAY/);
+  });
+
+  it('needs merchant id, secret and notify URL for PayHere, sandbox by default outside production', () => {
+    expect(() => loadEnv({ ...valid, BILLING_GATEWAY: 'payhere' })).toThrowError(/PAYHERE_MERCHANT_ID.*PAYHERE_MERCHANT_SECRET.*PAYHERE_NOTIFY_URL/);
+    const env = loadEnv({ ...valid, BILLING_GATEWAY: 'payhere', PAYHERE_MERCHANT_ID: '1211149', PAYHERE_MERCHANT_SECRET: 's3cret', PAYHERE_NOTIFY_URL: 'https://api.example.lk/api/platform/billing/webhooks/payhere' });
+    expect(env).toMatchObject({ BILLING_GATEWAY: 'payhere', PAYHERE_SANDBOX: true });
+  });
+
   it('rejects a PII key that is not 32 bytes, without echoing the value', () => {
     const secret = Buffer.alloc(16, 7).toString('base64');
     expect(() => loadEnv({ ...valid, PII_KEY: secret })).toThrowError(/PII_KEY/);

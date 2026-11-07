@@ -5,7 +5,7 @@ import type { z } from 'zod';
 import { AppError } from '../../common/errors/app-error.js';
 import type { RequestWithContext } from '../../common/request-context.js';
 import { ZodPipe } from '../../common/zod.pipe.js';
-import { Public, RequiresDevice } from '../access/decorators.js';
+import { AllowWhenBillingSuspended, Public, RequiresDevice } from '../access/decorators.js';
 import { auditContext, requestMeta } from '../audit/audit-context.js';
 import { AuthService } from './auth.service.js';
 import { clearRefreshCookie, REFRESH_COOKIE, setRefreshCookie, TENANT_COOKIE_PATH } from './cookies.js';
@@ -21,6 +21,7 @@ export class AuthController {
   ) {}
 
   @Public()
+  @AllowWhenBillingSuspended()
   @Post('login')
   @HttpCode(200)
   async login(
@@ -35,6 +36,7 @@ export class AuthController {
   }
 
   @Public()
+  @AllowWhenBillingSuspended()
   @Post('mfa/verify')
   @HttpCode(200)
   async verifyMfa(
@@ -55,6 +57,7 @@ export class AuthController {
   }
 
   @Public()
+  @AllowWhenBillingSuspended()
   @Post('refresh')
   @HttpCode(200)
   async refresh(@Req() req: RequestWithContext, @Res({ passthrough: true }) res: Response) {
@@ -65,6 +68,7 @@ export class AuthController {
     return { accessToken: session.accessToken };
   }
 
+  @AllowWhenBillingSuspended()
   @Post('logout')
   @HttpCode(204)
   async logout(@Req() req: RequestWithContext, @Res({ passthrough: true }) res: Response) {

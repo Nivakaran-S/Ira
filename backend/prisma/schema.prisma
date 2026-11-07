@@ -75,6 +75,7 @@ model Tenant {
   users           User[]
   roles           Role[]
   invoices        Invoice[]
+  billingPayments BillingPayment[]
 }
 
 /// Platform-managed. Has tenantId but is read before any tenant context exists (host resolution).
@@ -481,6 +482,8 @@ model Shift {
   countedCash  Int?
   variance     Int?
   note         String?
+  /// Set when an offline close op closed the shift.
+  closeOpId    String?        @db.Uuid
   register     Register       @relation(fields: [tenantId, registerId], references: [tenantId, id])
   movements    CashMovement[]
   sales        Sale[]
@@ -564,6 +567,8 @@ model Sale {
   voidedAt         DateTime?
   voidedById       String?    @db.Uuid
   voidReason       String?
+  /// Set when an offline void op voided the sale, so a resent op is recognised.
+  voidOpId         String?          @db.Uuid
   shift            Shift      @relation(fields: [tenantId, shiftId], references: [tenantId, id])
   lines            SaleLine[]
   payments         Payment[]
@@ -618,6 +623,8 @@ model Payment {
   tendered  Int?
   change    Int           @default(0)
   reference String?
+  /// Integrated terminal result: scheme, last4, authCode, terminalRef.
+  card      Json?
   sale      Sale          @relation(fields: [tenantId, saleId], references: [tenantId, id], onDelete: Cascade)
 }
 
@@ -640,6 +647,8 @@ model Refund {
   /// Cash rounding on the payout (signed); paid out = total + rounding.
   rounding     Int           @default(0)
   offline      Boolean       @default(false)
+  /// Integrated terminal result for card refunds.
+  card         Json?
   createdAt    DateTime      @default(now())
   sale         Sale          @relation(fields: [tenantId, saleId], references: [tenantId, id])
   lines        RefundLine[]
@@ -731,6 +740,8 @@ model Customer {
   emailIdx     String?
   notes        String?
   customFields Json     @default("{}")
+  /// Down-sync: bumped on update and whenever a balance changes.
+  version      BigInt   @default(dbgenerated("nextval('sync_version')"))
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
@@ -1123,7 +1134,36 @@ model Invoice {
   paidAt      DateTime?
   paidRef     String?
   tenant      Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  payments    BillingPayment[]
 
   @@unique([tenantId, periodStart])
   @@index([status, dueOn])
+}
+
+enum BillingPaymentStatus {
+  PENDING
+  SUCCEEDED
+  FAILED
+}
+
+/// An online payment attempt for an invoice through a payment gateway. Platform table.
+model BillingPayment {
+  id            String               @id @default(uuid(7)) @db.Uuid
+  tenantId      String               @db.Uuid
+  invoiceId     String               @db.Uuid
+  provider      String
+  /// The gateway's checkout session id.
+  sessionId     String               @unique
+  status        BillingPaymentStatus @default(PENDING)
+  amount        Int
+  currency      String
+  /// The gateway's payment id once it succeeded.
+  providerRef   String?
+  failureReason String?
+  createdAt     DateTime             @default(now())
+  completedAt   DateTime?
+  tenant        Tenant               @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  invoice       Invoice              @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+
+  @@index([invoiceId])
 }

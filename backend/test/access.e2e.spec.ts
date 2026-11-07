@@ -70,7 +70,7 @@ describe('tenant status, modules, permissions', () => {
     const me = await http().get('/api/me').set('Host', host).set(bearer(token)).expect(200);
     expect(me.body).toEqual({
       user: { id: user.id, name: 'Test User', email: 'mgr@acme.lk' },
-      tenant: { id: t.id, name: 'Tenant acme', slug: 'acme' },
+      tenant: { id: t.id, name: 'Tenant acme', slug: 'acme', status: 'ACTIVE', suspendedReason: null },
       impersonatedBy: null,
       deviceId: null,
     });

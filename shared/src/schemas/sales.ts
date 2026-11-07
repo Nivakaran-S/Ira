@@ -11,10 +11,18 @@ export const DiscountSchema = z.discriminatedUnion('kind', [
 
 export const PAYMENT_METHODS = ['CASH', 'CARD', 'OTHER', 'LOYALTY', 'STORE_CREDIT'] as const;
 export type PaymentMethodKey = (typeof PAYMENT_METHODS)[number];
-/** Methods that work without the API: points and store credit need live balances. */
-export const OFFLINE_PAYMENT_METHODS = ['CASH', 'CARD', 'OTHER'] as const;
 /** What a refund can be paid back as. */
 export const REFUND_METHODS = ['CASH', 'CARD', 'OTHER', 'STORE_CREDIT'] as const;
+
+/** What an integrated card terminal reported for an approved charge or refund. */
+export const CardResultSchema = z.object({
+  scheme: z.string().trim().max(20),
+  last4: z.string().regex(/^\d{4}$/),
+  authCode: z.string().trim().max(20),
+  /** The terminal's transaction id: refunds and reversals refer to it. */
+  terminalRef: z.string().trim().min(1).max(64),
+});
+export type CardResult = z.infer<typeof CardResultSchema>;
 
 export const PaymentInputSchema = z.object({
   method: z.enum(PAYMENT_METHODS),
@@ -23,6 +31,8 @@ export const PaymentInputSchema = z.object({
   tendered: minorAmount.optional(),
   /** Card terminal approval code or slip number. */
   reference: z.string().trim().max(64).optional(),
+  /** Card payments taken on an integrated terminal. */
+  card: CardResultSchema.optional(),
 });
 
 export const SaleLineInputSchema = z.object({
@@ -62,6 +72,8 @@ export const CreateRefundSchema = z.object({
   reason: z.string().trim().min(3).max(200),
   /** Put the goods back on the shelf. */
   restock: z.boolean().default(true),
+  /** Card refunds made on an integrated terminal. */
+  card: CardResultSchema.optional(),
 });
 
 export const OpenShiftSchema = z.object({ openingFloat: minorAmount });

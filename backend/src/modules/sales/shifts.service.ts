@@ -98,13 +98,23 @@ export class ShiftsService {
 
   open(tenant: TenantContext, registerId: string, userId: string, openingFloat: number, ctx: Ctx) {
     return this.tenantDb.run(tenant.id, async (tx) => {
-      const register = await tx.register.findUnique({ where: { id: registerId } });
-      if (!register) throw AppError.notFound('Register not found');
-      if (await this.openShift(tx, registerId)) throw AppError.conflict('A shift is already open on this register');
-      const shift = await tx.shift.create({ data: { tenantId: tenant.id, storeId: register.storeId, registerId, openedById: userId, openingFloat } });
-      await this.audit.record(tx, tenant.id, { ...ctx, action: 'shift.opened', entityType: 'Shift', entityId: shift.id, after: { openingFloat, registerId } });
+      const shift = await this.openWith(tx, tenant.id, { registerId, userId, openingFloat }, ctx);
       return this.report(tx, shift.id);
     });
+  }
+
+  /** Opens a shift; offline-opened shifts bring their own id and time. */
+  async openWith(tx: Tx, tenantId: string, s: { id?: string; registerId: string; userId: string; openingFloat: number; at?: Date; offline?: boolean }, ctx: Partial<Ctx>) {
+    const register = await tx.register.findUnique({ where: { id: s.registerId } });
+    if (!register) throw AppError.notFound('Register not found');
+    if (await this.openShift(tx, s.registerId)) throw AppError.conflict('A shift is already open on this register');
+    const shift = await tx.shift.create({
+      data: { ...(s.id ? { id: s.id } : {}), tenantId, storeId: register.storeId, registerId: s.registerId, openedById: s.userId, openingFloat: s.openingFloat, ...(s.at ? { openedAt: s.at } : {}) },
+    });
+    await this.audit.record(tx, tenantId, {
+      ...ctx, action: 'shift.opened', entityType: 'Shift', entityId: shift.id, after: { openingFloat: s.openingFloat, registerId: s.registerId, ...(s.offline ? { offline: true } : {}) },
+    });
+    return shift;
   }
 
   cashMovement(
@@ -137,20 +147,30 @@ export class ShiftsService {
   close(tenant: TenantContext, registerId: string, userId: string, input: { countedCash: number; note?: string }, approvedById: string | null, ctx: Ctx) {
     return this.tenantDb.run(tenant.id, async (tx) => {
       const shift = await this.requireOpenShift(tx, registerId);
-      const before = await this.report(tx, shift.id);
-      const variance = input.countedCash - before.cash.expected;
-      await tx.shift.update({
-        where: { id: shift.id },
-        data: {
-          status: 'CLOSED', closedAt: new Date(), closedById: userId, expectedCash: before.cash.expected,
-          countedCash: input.countedCash, variance, note: input.note ?? null,
-        },
-      });
-      await this.audit.record(tx, tenant.id, {
-        ...ctx, action: 'shift.closed', entityType: 'Shift', entityId: shift.id,
-        after: { expectedCash: before.cash.expected, countedCash: input.countedCash, variance, approvedById },
-      });
+      await this.closeWith(tx, tenant.id, shift.id, { userId, ...input, approvedById }, ctx);
       return this.report(tx, shift.id);
+    });
+  }
+
+  /** Closes an open shift against what its ledgers say the drawer should hold. */
+  async closeWith(
+    tx: Tx, tenantId: string, shiftId: string,
+    c: { userId: string; countedCash: number; note?: string; approvedById: string | null; at?: Date; opId?: string },
+    ctx: Partial<Ctx>,
+  ) {
+    const before = await this.report(tx, shiftId);
+    if (before.shift.status !== 'OPEN') throw new AppError('INVALID_STATE', 409, 'This shift is already closed');
+    const variance = c.countedCash - before.cash.expected;
+    await tx.shift.update({
+      where: { id: shiftId },
+      data: {
+        status: 'CLOSED', closedAt: c.at ?? new Date(), closedById: c.userId, expectedCash: before.cash.expected,
+        countedCash: c.countedCash, variance, note: c.note ?? null, closeOpId: c.opId ?? null,
+      },
+    });
+    await this.audit.record(tx, tenantId, {
+      ...ctx, action: 'shift.closed', entityType: 'Shift', entityId: shiftId,
+      after: { expectedCash: before.cash.expected, countedCash: c.countedCash, variance, approvedById: c.approvedById, ...(c.opId ? { offline: true } : {}) },
     });
   }
 

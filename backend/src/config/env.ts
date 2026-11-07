@@ -15,6 +15,25 @@ const EnvSchema = z.object({
     .optional()
     .transform((v) => (v ? v.split(',').map((s) => s.trim()).filter(Boolean) : [])),
   TRUST_PROXY: z.string().default('loopback,uniquelocal'),
+  /** Online invoice payments. Defaults to the sandbox outside production and to none in it. */
+  BILLING_GATEWAY: z.enum(['none', 'sandbox', 'payhere']).optional(),
+  PAYHERE_MERCHANT_ID: z.string().trim().min(1).optional(),
+  PAYHERE_MERCHANT_SECRET: z.string().trim().min(1).optional(),
+  /** true: sandbox.payhere.lk (free test merchant). Defaults to true outside production. */
+  PAYHERE_SANDBOX: z.enum(['true', 'false']).optional(),
+  /** Public URL PayHere posts notifications to: https://<api host>/api/platform/billing/webhooks/payhere */
+  PAYHERE_NOTIFY_URL: z.url().optional(),
+}).transform((e, ctx) => {
+  const gateway = e.BILLING_GATEWAY ?? (e.NODE_ENV === 'production' ? 'none' : 'sandbox');
+  if (gateway === 'sandbox' && e.NODE_ENV === 'production') {
+    ctx.addIssue({ code: 'custom', path: ['BILLING_GATEWAY'], message: 'the sandbox gateway cannot run in production' });
+  }
+  if (gateway === 'payhere') {
+    for (const k of ['PAYHERE_MERCHANT_ID', 'PAYHERE_MERCHANT_SECRET', 'PAYHERE_NOTIFY_URL'] as const) {
+      if (!e[k]) ctx.addIssue({ code: 'custom', path: [k], message: 'required when BILLING_GATEWAY=payhere' });
+    }
+  }
+  return { ...e, BILLING_GATEWAY: gateway, PAYHERE_SANDBOX: (e.PAYHERE_SANDBOX ?? (e.NODE_ENV === 'production' ? 'false' : 'true')) === 'true' };
 });
 
 export type Env = z.infer<typeof EnvSchema>;

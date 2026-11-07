@@ -10,6 +10,7 @@ export const DEVICE_KEY = 'pos:device';
 export const MODULE_KEY = 'pos:module';
 export const PERMISSION_KEY = 'pos:permission';
 export const STEP_UP_KEY = 'pos:step-up';
+export const BILLING_SUSPENDED_KEY = 'pos:billing-suspended';
 
 /** Which host serves this route. Default (no decorator) is 'tenant'. */
 export const Realm = (realm: RouteRealm) => SetMetadata(REALM_KEY, realm);
@@ -19,6 +20,8 @@ export const RequiresDevice = () => SetMetadata(DEVICE_KEY, true);
 export const RequiresModule = (key: ModuleKey) => SetMetadata(MODULE_KEY, key);
 export const RequiresPermission = (permission: Permission) => SetMetadata(PERMISSION_KEY, permission);
 export const RequiresStepUp = (action: Permission) => SetMetadata(STEP_UP_KEY, action);
+/** Stays reachable while the tenant is suspended for an unpaid invoice, so the owner can sign in and pay. */
+export const AllowWhenBillingSuspended = () => SetMetadata(BILLING_SUSPENDED_KEY, true);
 
 export function routeMeta<T>(reflector: Reflector, key: string, ctx: ExecutionContext): T | undefined {
   return reflector.getAllAndOverride<T>(key, [ctx.getHandler(), ctx.getClass()]);

@@ -189,13 +189,15 @@ describe('business modules', () => {
       await ownerDb().invoice.updateMany({ data: { dueOn: new Date(Date.now() - 20 * 86_400_000) } });
       expect((await asAdmin(http().post('/api/platform/billing/run')).expect(200)).body.suspended).toBe(1);
       await flushRedis();
-      const blocked = await asOwner(http().get('/api/billing'));
+      // Everything is closed except what the owner needs to pay.
+      const blocked = await asOwner(http().get('/api/stores'));
       expect(blocked.body.code).toBe('TENANT_SUSPENDED');
+      await asOwner(http().get('/api/billing')).expect(200);
 
       const invoice = (await asAdmin(http().get('/api/platform/invoices?status=DUE')).expect(200)).body[0];
       await asAdmin(http().post(`/api/platform/invoices/${invoice.id}/pay`)).send({ reference: 'BOC-TT-9921' }).expect(200);
       await flushRedis();
-      await asOwner(http().get('/api/billing')).expect(200);
+      await asOwner(http().get('/api/stores')).expect(200);
       expect((await ownerDb().tenant.findUniqueOrThrow({ where: { id: tenantId } })).suspendedReason).toBeNull();
 
       // Cannot move to a plan the tenant already outgrows.
