@@ -18,6 +18,8 @@ export interface StockChange {
   refId?: string;
   note?: string;
   userId?: string | null;
+  /** Batch-expiry: the lot this movement came from or went to. */
+  batchId?: string | null;
 }
 
 @Injectable()
@@ -37,7 +39,7 @@ export class InventoryService {
       await tx.stockMovement.create({
         data: {
           tenantId, storeId: c.storeId, productId: c.productId, deltaMilli: c.deltaMilli, reason: c.reason,
-          refType: c.refType ?? null, refId: c.refId ?? null, note: c.note ?? null, userId: c.userId ?? null,
+          refType: c.refType ?? null, refId: c.refId ?? null, note: c.note ?? null, userId: c.userId ?? null, batchId: c.batchId ?? null,
         },
       });
       await tx.stockLevel.upsert({

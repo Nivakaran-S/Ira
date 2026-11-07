@@ -30,6 +30,14 @@ export const ProductSchema = z.object({
   price: minorAmount,
   active: z.boolean().default(true),
   trackStock: z.boolean().default(true),
+  /** Weighed-items module: price is per kg and quantities are weights (1 kg = 1000). */
+  soldByWeight: z.boolean().optional(),
+  /** Number the store's scales print on labels. */
+  plu: z.string().regex(/^\d{3,6}$/).nullable().optional(),
+  /** Batch-expiry module: stock is held in lots with expiry dates, sold first-expiring-first. */
+  tracksBatches: z.boolean().optional(),
+  /** Prescriptions module: only sold against a prescription. */
+  rxRequired: z.boolean().optional(),
 });
 
 export const UpdateProductSchema = ProductSchema.partial();

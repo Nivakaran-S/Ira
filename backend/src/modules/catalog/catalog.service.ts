@@ -242,6 +242,7 @@ export class CatalogService {
         products: products.map((p) => ({
           id: p.id, name: p.name, sku: p.sku, price: p.price, categoryId: p.categoryId, trackStock: p.trackStock, taxes: taxStack(p.taxGroup),
           hasVariants: p.hasVariants, parentId: p.parentId, variantLabel: p.variantLabel, barcodes: p.barcodes.map((b) => b.code),
+          soldByWeight: p.soldByWeight, plu: p.plu, tracksBatches: p.tracksBatches, rxRequired: p.rxRequired,
         })),
       };
     });

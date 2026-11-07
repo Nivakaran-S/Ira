@@ -1,9 +1,11 @@
 import { Injectable } from '@nestjs/common';
 import {
-  approvalNeeds, cashRound, chooseModifiers, type CreateRefundSchema, type CreateSaleSchema, type Discount, type ModuleKey, type PaymentMethodKey, type Permission,
+  approvalNeeds, type BatchTake, cashRound, chooseModifiers, type CreateRefundSchema, type CreateSaleSchema, type Discount, type ModuleKey, type PaymentMethodKey, type Permission,
   pointsEarned, priceWithPromotions, type PricingResult, prorate, type TenantSettings, withModifiers,
 } from '@pos/shared';
 import { ModifiersService } from '../restaurant/modifiers.service.js';
+import { BatchesService } from '../pharmacy/batches.service.js';
+import { PrescriptionsService } from '../pharmacy/prescriptions.service.js';
 import type { z } from 'zod';
 import { AppError } from '../../common/errors/app-error.js';
 import type { RequestWithContext, TenantContext } from '../../common/request-context.js';
@@ -104,11 +106,16 @@ export interface SaleRecord {
   /** Set when the loyalty module is on: how points are earned and what they are worth. */
   loyalty?: TenantSettings['loyalty'] | null;
   tip?: number;
+  /** Batch-expiry on: lines of products that track lots take stock first-expiring-first. */
+  batchesOn?: boolean;
+  /** Prescriptions on: days a prescription stays valid. */
+  rxValidDays?: number | null;
   /** Paying (part of) an open order: which order lines and how much of each. */
   orderPay?: { orderId: string; lines: { orderLineId: string; qtyMilli: number }[] } | null;
   lines: {
     productId: string; name: string; sku: string | null; unitPrice: number; listPrice: number; qtyMilli: number; note?: string; trackStock: boolean;
     modifiers?: { id: string; name: string; priceDelta: number }[]; orderLineId?: string | null;
+    tracksBatches?: boolean; rxRequired?: boolean; prescriptionItemId?: string | null;
   }[];
 }
 
@@ -165,6 +172,8 @@ export class SalesService {
     private readonly ledgers: LedgersService,
     private readonly promotions: PromotionsService,
     private readonly modifiers: ModifiersService,
+    private readonly batches: BatchesService,
+    private readonly prescriptions: PrescriptionsService,
   ) {}
 
   /** The cashier's own permission is enough unless the action crosses a threshold; otherwise a manager approves. */
@@ -255,6 +264,15 @@ export class SalesService {
     const approvals: Approval[] = [];
     const saleLines = input.lines.map((l, i) => ({ ...l, listPrice: listPrice(i), unitPrice: l.unitPrice ?? listPrice(i) }));
     for (const n of approvalNeeds(perms, settings, saleLines, input.cartDiscount, priced)) await this.authorize(req, perms, n.action, n.force, approvals);
+    // Prescription-only medicines: a prescription item per line, a customer, and a pharmacist (or their approval).
+    const rxOn = modules.includes('prescriptions');
+    const rxLines = rxOn ? input.lines.filter((l) => byId.get(l.productId)!.rxRequired) : [];
+    if (rxLines.length) {
+      if (!input.customerId) throw new AppError('INVALID_STATE', 409, 'Prescription medicines need the customer on the sale');
+      const missingRx = rxLines.find((l) => !l.prescriptionItemId);
+      if (missingRx) throw new AppError('INVALID_STATE', 409, `${byId.get(missingRx.productId)!.name} needs a prescription`, { productId: missingRx.productId });
+      await this.authorize(req, perms, 'prescription.dispense', false, approvals);
+    }
 
     const allCash = input.payments.every((p) => p.method === 'CASH');
     const due = allCash ? cashRound(priced.totals.total, settings.cashRoundingUnit) : priced.totals.total;
@@ -274,11 +292,14 @@ export class SalesService {
         loyalty: modules.includes('loyalty') ? settings.loyalty : null,
         tip: input.tip ?? 0,
         orderPay,
+        batchesOn: modules.includes('batch-expiry'),
+        rxValidDays: rxOn ? settings.pharmacy.rxValidDays : null,
         lines: input.lines.map((l, i) => {
           const p = byId.get(l.productId)!;
           return {
             productId: p.id, name: p.name, sku: p.sku, unitPrice: l.unitPrice ?? listPrice(i), listPrice: listPrice(i), qtyMilli: l.qtyMilli, note: l.note,
             trackStock: p.trackStock, modifiers: chosen[i], orderLineId: orderPay?.lines[i]?.orderLineId ?? null,
+            tracksBatches: p.tracksBatches, rxRequired: rxOn && p.rxRequired, prescriptionItemId: l.prescriptionItemId ?? null,
           };
         }),
       }, auditContext(req));
@@ -288,6 +309,15 @@ export class SalesService {
 
   /** Writes a priced, paid sale with its lines, payments, stock movements and audit event. */
   async persistSale(tx: Tx, tenantId: string, r: SaleRecord, ctx: Partial<AuditEntry>) {
+    for (const l of r.lines) {
+      if (!l.rxRequired || !l.prescriptionItemId) continue;
+      const item = await this.prescriptions.checkDispense(tx, l.prescriptionItemId, r.customerId, l.productId, l.qtyMilli, r.rxValidDays ?? 30);
+      await this.prescriptions.dispense(tx, item.id, l.qtyMilli, item.dispensedQtyMilli);
+    }
+    const lineBatches = new Map<number, Awaited<ReturnType<BatchesService['take']>>>();
+    if (r.batchesOn) {
+      for (const [i, l] of r.lines.entries()) if (l.tracksBatches) lineBatches.set(i, await this.batches.take(tx, r.storeId, l.productId, l.qtyMilli));
+    }
     let loyaltyEarned = 0;
     if (r.customerId) {
       // Spend balances under a per-customer lock so two tills cannot spend the same points or credit.
@@ -327,6 +357,7 @@ export class SalesService {
               position: i, productId: src.productId, name: src.name, sku: src.sku, unitPrice: src.unitPrice, listPrice: src.listPrice,
               qtyMilli: src.qtyMilli, gross: l.gross, discount: l.discount, discounts: json(l.discounts), net: l.net, tax: l.tax,
               taxes: json(l.taxes), total: l.total, note: src.note ?? null, modifiers: json(src.modifiers ?? []), orderLineId: src.orderLineId ?? null,
+              batches: json(lineBatches.get(i)?.takes ?? []), prescriptionItemId: src.prescriptionItemId ?? null,
             };
           }),
         },
@@ -337,9 +368,13 @@ export class SalesService {
     });
     await this.inventory.apply(
       tx, tenantId,
-      r.lines.filter((l) => l.trackStock).map((l) => ({
-        storeId: r.storeId, productId: l.productId, deltaMilli: -l.qtyMilli, reason: 'SALE' as const, refType: 'Sale', refId: r.id, userId: r.cashierId,
-      })),
+      r.lines.flatMap((l, i) => {
+        if (!l.trackStock) return [];
+        const base = { storeId: r.storeId, productId: l.productId, reason: 'SALE' as const, refType: 'Sale', refId: r.id, userId: r.cashierId };
+        const lots = lineBatches.get(i);
+        if (!lots) return [{ ...base, deltaMilli: -l.qtyMilli }];
+        return [...lots.takes.map((t) => ({ ...base, deltaMilli: -t.qtyMilli, batchId: t.batchId })), ...(lots.short ? [{ ...base, deltaMilli: -lots.short }] : [])];
+      }),
     );
     if (r.orderPay) await this.markOrderPaid(tx, r.orderPay);
     await this.audit.record(tx, tenantId, {
@@ -393,6 +428,10 @@ export class SalesService {
       }
       const tracked = await tx.product.findMany({ where: { id: { in: sale.lines.map((l) => l.productId) }, trackStock: true }, select: { id: true } });
       const trackedIds = new Set(tracked.map((p) => p.id));
+      for (const l of sale.lines) {
+        const takes = (l.batches as unknown as BatchTake[]) ?? [];
+        if (takes.length) await this.batches.giveBack(tx, takes, l.qtyMilli);
+      }
       await this.inventory.apply(
         tx, tenant.id,
         sale.lines.filter((l) => trackedIds.has(l.productId)).map((l) => ({
@@ -479,6 +518,11 @@ export class SalesService {
       }
     }
     if (r.restock) {
+      const saleLines = await tx.saleLine.findMany({ where: { id: { in: r.lines.map((l) => l.saleLineId) } }, select: { id: true, batches: true } });
+      for (const l of r.lines) {
+        const takes = (saleLines.find((x) => x.id === l.saleLineId)?.batches as unknown as BatchTake[] | undefined) ?? [];
+        if (takes.length) await this.batches.giveBack(tx, takes, l.qtyMilli);
+      }
       const tracked = await tx.product.findMany({ where: { id: { in: r.lines.map((l) => l.productId) }, trackStock: true }, select: { id: true } });
       const trackedIds = new Set(tracked.map((p) => p.id));
       await this.inventory.apply(

@@ -34,6 +34,8 @@ export const SaleLineInputSchema = z.object({
   note: z.string().trim().max(200).optional(),
   /** Modifiers module: options chosen for this item; their price deltas add to the unit price. */
   modifierIds: z.array(z.uuid()).max(20).optional(),
+  /** Prescriptions module: the prescription item this line dispenses. */
+  prescriptionItemId: z.uuid().optional(),
 });
 
 export const CreateSaleSchema = z.object({

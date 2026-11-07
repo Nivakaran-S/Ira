@@ -32,6 +32,22 @@ export const TenantSettingsSchema = z.object({
       allowCard: z.boolean().default(false),
     })
     .prefault({}),
+  scaleBarcode: z
+    .object({
+      enabled: z.boolean().default(false),
+      prefix: z.string().regex(/^\d{1,2}$/).default('2'),
+      pluDigits: z.int().min(3).max(6).default(5),
+      valueType: z.enum(['weight', 'price']).default('weight'),
+    })
+    .prefault({}),
+  pharmacy: z
+    .object({
+      /** A prescription can be dispensed for this many days after it was written. */
+      rxValidDays: z.int().min(1).max(365).default(30),
+      /** Lots expiring within this many days are flagged. */
+      expiryWarnDays: z.int().min(1).max(365).default(30),
+    })
+    .prefault({}),
   loyalty: z
     .object({
       /** One point per this much spent (minor units). */

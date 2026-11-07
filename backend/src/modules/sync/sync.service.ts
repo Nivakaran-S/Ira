@@ -129,6 +129,7 @@ export class SyncService {
       products: data.products.map((p) => ({
         id: p.id, name: p.name, sku: p.sku, price: p.price, categoryId: p.categoryId, taxGroupId: p.taxGroupId, active: p.active, trackStock: p.trackStock,
         hasVariants: p.hasVariants, parentId: p.parentId, variantLabel: p.variantLabel,
+        soldByWeight: p.soldByWeight, plu: p.plu, tracksBatches: p.tracksBatches, rxRequired: p.rxRequired,
         modifierGroupIds: data.links.filter((l) => l.productId === p.id).map((l) => l.groupId),
       })),
       modifierGroups: data.modifierGroups.map(toGroupDef),
@@ -299,6 +300,9 @@ export class SyncService {
       for (const l of s.lines) {
         const p = byId.get(l.productId);
         if (!p) throw new Reject('UNKNOWN_PRODUCT', { productId: l.productId });
+        if (p.rxRequired && (await this.capabilities.modulesFor({ id: tenantId, businessTypeId: await this.businessTypeOf(tenantId) })).includes('prescriptions')) {
+          throw new Reject('RX_NEEDS_ONLINE', { productId: p.id });
+        }
         const groups = modGroups.get(p.id) ?? [];
         if (!waive.prices && groups.every((g) => g.version <= cv) && p.version <= cv) {
           const r = chooseModifiers(groups, (l.modifiers ?? []).map((m) => m.id));
@@ -347,12 +351,13 @@ export class SyncService {
         id: s.id, storeId: shift.storeId, registerId: device.registerId, shiftId: shift.id, deviceId: device.id, cashierId: s.cashierId,
         receiptNo: s.receiptNo, pricesIncludeTax: settings.pricesIncludeTax, priced, due, payments, cartDiscount: s.cartDiscount,
         approvals: s.approvals, soldAt: at, offline: true, catalogVersion: cv, tip: s.tip,
+        batchesOn: (await this.capabilities.modulesFor({ id: tenantId, businessTypeId: await this.businessTypeOf(tenantId) })).includes('batch-expiry'),
         promotions: appliedPromotions(priced, new Map([...Object.values(applied.lines).flat(), ...applied.cart].map((a) => [a.label, a.promotionId]))),
         lines: s.lines.map((l) => {
           const p = byId.get(l.productId)!;
           return {
             productId: p.id, name: p.name, sku: p.sku, unitPrice: l.unitPrice, listPrice: l.listPrice, qtyMilli: l.qtyMilli, note: l.note, trackStock: p.trackStock,
-            modifiers: l.modifiers ?? [],
+            modifiers: l.modifiers ?? [], tracksBatches: p.tracksBatches,
           };
         }),
       }, { ...auditCtx, actorUserId: s.cashierId });

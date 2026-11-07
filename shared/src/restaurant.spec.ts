@@ -28,3 +28,19 @@ describe('chooseModifiers', () => {
     expect(chooseModifiers([size, extras], ['s', 'old']).ok).toBe(false);
   });
 });
+
+describe('allocateFefo', async () => {
+  const { allocateFefo } = await import('./schemas/grocery.js');
+  const lots = [
+    { id: 'b', lotNo: 'B', expiresOn: '2026-12-31', qtyMilli: 5_000 },
+    { id: 'old', lotNo: 'OLD', expiresOn: '2026-10-01', qtyMilli: 9_000 },
+    { id: 'a', lotNo: 'A', expiresOn: '2026-11-30', qtyMilli: 2_000 },
+  ];
+  it('takes the earliest unexpired lots first and reports any shortfall', () => {
+    expect(allocateFefo(lots, 4_000, '2026-11-07')).toEqual({
+      takes: [{ batchId: 'a', lotNo: 'A', expiresOn: '2026-11-30', qtyMilli: 2_000 }, { batchId: 'b', lotNo: 'B', expiresOn: '2026-12-31', qtyMilli: 2_000 }],
+      short: 0,
+    });
+    expect(allocateFefo(lots, 10_000, '2026-11-07').short).toBe(3_000);
+  });
+});

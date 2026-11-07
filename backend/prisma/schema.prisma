@@ -378,6 +378,14 @@ model Product {
   hasVariants    Boolean                @default(false)
   parentId       String?                @db.Uuid
   variantLabel   String?
+  /// Weighed-items: price per kg, quantities are weights (1 kg = 1000).
+  soldByWeight   Boolean                @default(false)
+  /// Scale label number.
+  plu            String?
+  /// Batch-expiry: stock in dated lots, sold first-expiring-first.
+  tracksBatches  Boolean                @default(false)
+  /// Prescriptions: only sold against a prescription item.
+  rxRequired     Boolean                @default(false)
   createdAt      DateTime               @default(now())
   updatedAt      DateTime               @updatedAt
   category       Category?              @relation(fields: [tenantId, categoryId], references: [tenantId, id])
@@ -391,6 +399,7 @@ model Product {
 
   @@unique([tenantId, id])
   @@unique([tenantId, sku])
+  @@unique([tenantId, plu])
   @@index([tenantId, parentId])
 }
 
@@ -430,6 +439,7 @@ model StockMovement {
   refId      String?     @db.Uuid
   note       String?
   userId     String?     @db.Uuid
+  batchId    String?     @db.Uuid
   createdAt  DateTime    @default(now())
   product    Product     @relation(fields: [tenantId, productId], references: [tenantId, id])
 
@@ -553,30 +563,33 @@ model Sale {
 }
 
 model SaleLine {
-  id               String       @id @default(uuid(7)) @db.Uuid
-  tenantId         String       @db.Uuid
-  saleId           String       @db.Uuid
-  position         Int
-  productId        String       @db.Uuid
-  name             String
-  sku              String?
-  unitPrice        Int
-  listPrice        Int
-  qtyMilli         Int
-  gross            Int
-  discount         Int
-  discounts        Json
-  net              Int
-  tax              Int
-  taxes            Json
-  total            Int
-  note             String?
+  id                 String       @id @default(uuid(7)) @db.Uuid
+  tenantId           String       @db.Uuid
+  saleId             String       @db.Uuid
+  position           Int
+  productId          String       @db.Uuid
+  name               String
+  sku                String?
+  unitPrice          Int
+  listPrice          Int
+  qtyMilli           Int
+  gross              Int
+  discount           Int
+  discounts          Json
+  net                Int
+  tax                Int
+  taxes              Json
+  total              Int
+  note               String?
   /// Modifiers chosen: [{id, name, priceDelta}]; unitPrice and listPrice include them.
-  modifiers        Json         @default("[]")
-  orderLineId      String?      @db.Uuid
-  refundedQtyMilli Int          @default(0)
-  sale             Sale         @relation(fields: [tenantId, saleId], references: [tenantId, id], onDelete: Cascade)
-  refundLines      RefundLine[]
+  modifiers          Json         @default("[]")
+  orderLineId        String?      @db.Uuid
+  /// Lots this line was taken from: [{batchId, lotNo, expiresOn, qtyMilli}].
+  batches            Json         @default("[]")
+  prescriptionItemId String?      @db.Uuid
+  refundedQtyMilli   Int          @default(0)
+  sale               Sale         @relation(fields: [tenantId, saleId], references: [tenantId, id], onDelete: Cascade)
+  refundLines        RefundLine[]
 
   @@unique([tenantId, id])
 }
@@ -898,4 +911,50 @@ model OrderLine {
 
   @@unique([tenantId, id])
   @@index([tenantId, status, sentAt])
+}
+
+// ---------------- Grocery and pharmacy ----------------
+
+model Batch {
+  id         String   @id @default(uuid(7)) @db.Uuid
+  tenantId   String   @db.Uuid
+  storeId    String   @db.Uuid
+  productId  String   @db.Uuid
+  lotNo      String
+  expiresOn  DateTime @db.Date
+  qtyMilli   Int      @default(0)
+  receivedAt DateTime @default(now())
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, storeId, productId, lotNo])
+  @@index([tenantId, storeId, expiresOn])
+}
+
+model Prescription {
+  id              String             @id @default(uuid(7)) @db.Uuid
+  tenantId        String             @db.Uuid
+  customerId      String             @db.Uuid
+  prescriber      String
+  prescriberRegNo String?
+  issuedOn        DateTime           @db.Date
+  notes           String?
+  createdById     String             @db.Uuid
+  createdAt       DateTime           @default(now())
+  items           PrescriptionItem[]
+
+  @@unique([tenantId, id])
+  @@index([tenantId, customerId, issuedOn])
+}
+
+model PrescriptionItem {
+  id                String       @id @default(uuid(7)) @db.Uuid
+  tenantId          String       @db.Uuid
+  prescriptionId    String       @db.Uuid
+  productId         String       @db.Uuid
+  qtyMilli          Int
+  dispensedQtyMilli Int          @default(0)
+  directions        String?
+  prescription      Prescription @relation(fields: [tenantId, prescriptionId], references: [tenantId, id], onDelete: Cascade)
+
+  @@unique([tenantId, id])
 }

@@ -21,10 +21,11 @@ import { CustomersModule } from './modules/customers/customers.module.js';
 import { PromotionsModule } from './modules/promotions/promotions.module.js';
 import { ModifiersModule } from './modules/restaurant/modifiers.module.js';
 import { RestaurantModule } from './modules/restaurant/restaurant.module.js';
+import { PharmacyModule } from './modules/pharmacy/pharmacy.module.js';
 
 @Module({
   imports: [ScheduleModule.forRoot(), ConfigModule, InfraModule, SecurityModule, AuditModule, AccessModule, IdentityModule, BackofficeModule, PlatformModule,
-    SettingsModule, CatalogModule, InventoryModule, SalesModule, ReportingModule, SyncModule, CustomersModule, PromotionsModule, ModifiersModule, RestaurantModule],
+    SettingsModule, CatalogModule, InventoryModule, SalesModule, ReportingModule, SyncModule, CustomersModule, PromotionsModule, ModifiersModule, RestaurantModule, PharmacyModule],
   controllers: [HealthController],
   providers: [{ provide: APP_FILTER, useClass: AppErrorFilter }],
 })

@@ -22,6 +22,7 @@ export const PERMISSIONS = [
   'promotion.manage',
   'kitchen.view',
   'table.manage',
+  'prescription.dispense',
 ] as const;
 
 export type Permission = (typeof PERMISSIONS)[number];

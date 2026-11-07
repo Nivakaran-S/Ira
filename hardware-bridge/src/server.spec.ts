@@ -128,3 +128,14 @@ describe('bridge server', () => {
     expect(bad.status).toBe(403);
   });
 });
+
+describe('scale frames', async () => {
+  const { parseScaleFrame } = await import('./scale.js');
+  it('reads common scale outputs', () => {
+    expect(parseScaleFrame('ST,GS,+  1.250kg')).toEqual({ grams: 1250, stable: true });
+    expect(parseScaleFrame('US,GS,+  0.980kg')).toEqual({ grams: 980, stable: false });
+    expect(parseScaleFrame('W 01250 g')).toEqual({ grams: 1250, stable: true });
+    expect(parseScaleFrame('  2,5 kg')).toEqual({ grams: 2500, stable: true });
+    expect(parseScaleFrame('ERR')).toBeNull();
+  });
+});
