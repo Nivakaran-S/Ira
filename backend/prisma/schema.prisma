@@ -169,6 +169,8 @@ model Register {
   createdAt   DateTime           @default(now())
   /// Last receipt sequence handed out for this register.
   receiptSeq  Int                @default(0)
+  /// Last offline receipt number reserved for a device of this register ({code}-O{n}).
+  offlineSeq  Int                @default(0)
   store       Store              @relation(fields: [tenantId, storeId], references: [tenantId, id])
   devices     Device[]
   enrollments DeviceEnrollment[]
@@ -230,15 +232,18 @@ model UserRole {
 }
 
 model Device {
-  id           String    @id @default(uuid(7)) @db.Uuid
-  tenantId     String    @db.Uuid
-  registerId   String    @db.Uuid
-  name         String
-  publicKeyJwk Json
-  enrolledById String    @db.Uuid
-  enrolledAt   DateTime  @default(now())
-  revokedAt    DateTime?
-  register     Register  @relation(fields: [tenantId, registerId], references: [tenantId, id])
+  id                String    @id @default(uuid(7)) @db.Uuid
+  tenantId          String    @db.Uuid
+  registerId        String    @db.Uuid
+  name              String
+  publicKeyJwk      Json
+  enrolledById      String    @db.Uuid
+  enrolledAt        DateTime  @default(now())
+  revokedAt         DateTime?
+  /// Receipt numbers reserved for offline sales on this device: [offlineBlockStart, offlineBlockEnd].
+  offlineBlockStart Int?
+  offlineBlockEnd   Int?
+  register          Register  @relation(fields: [tenantId, registerId], references: [tenantId, id])
 
   @@unique([tenantId, id])
 }
@@ -323,6 +328,7 @@ model TaxGroup {
   id        String         @id @default(uuid(7)) @db.Uuid
   tenantId  String         @db.Uuid
   name      String
+  version   BigInt         @default(dbgenerated("nextval('sync_version')"))
   createdAt DateTime       @default(now())
   rates     TaxGroupRate[]
   products  Product[]
@@ -346,6 +352,7 @@ model Category {
   id        String    @id @default(uuid(7)) @db.Uuid
   tenantId  String    @db.Uuid
   name      String
+  version   BigInt    @default(dbgenerated("nextval('sync_version')"))
   color     String?
   sortOrder Int       @default(0)
   createdAt DateTime  @default(now())
@@ -359,6 +366,7 @@ model Product {
   id           String          @id @default(uuid(7)) @db.Uuid
   tenantId     String          @db.Uuid
   name         String
+  version      BigInt          @default(dbgenerated("nextval('sync_version')"))
   sku          String?
   categoryId   String?         @db.Uuid
   taxGroupId   String?         @db.Uuid
@@ -506,6 +514,9 @@ model Sale {
   approvals        Json       @default("[]")
   soldAt           DateTime
   createdAt        DateTime   @default(now())
+  /// Rung up offline and synced later; catalogVersion is the down-sync cursor the till priced it with.
+  offline          Boolean    @default(false)
+  catalogVersion   BigInt?
   voidedAt         DateTime?
   voidedById       String?    @db.Uuid
   voidReason       String?
@@ -575,6 +586,7 @@ model Refund {
   taxTotal     Int
   /// Cash rounding on the payout (signed); paid out = total + rounding.
   rounding     Int           @default(0)
+  offline      Boolean       @default(false)
   createdAt    DateTime      @default(now())
   sale         Sale          @relation(fields: [tenantId, saleId], references: [tenantId, id])
   lines        RefundLine[]
@@ -594,4 +606,47 @@ model RefundLine {
   total      Int
   refund     Refund   @relation(fields: [tenantId, refundId], references: [tenantId, id], onDelete: Cascade)
   saleLine   SaleLine @relation(fields: [tenantId, saleLineId], references: [tenantId, id])
+}
+
+// ---------------- Offline sync ----------------
+
+/// Where each device's offline hash chain stands, and when it last talked to the server.
+model SyncCursor {
+  deviceId      String   @id @db.Uuid
+  tenantId      String   @db.Uuid
+  lastSeq       Int      @default(0)
+  lastHash      String
+  lastContactAt DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@unique([tenantId, deviceId])
+}
+
+enum QuarantineStatus {
+  PENDING
+  ACCEPTED
+  REJECTED
+}
+
+/// Offline operations that failed verification. Never applied or dropped silently: a manager decides.
+model SyncQuarantine {
+  id           String           @id @default(uuid(7)) @db.Uuid
+  tenantId     String           @db.Uuid
+  deviceId     String           @db.Uuid
+  registerId   String           @db.Uuid
+  opId         String           @db.Uuid
+  kind         String
+  seq          Int
+  reason       String
+  details      Json?
+  op           Json
+  status       QuarantineStatus @default(PENDING)
+  reviewedById String?          @db.Uuid
+  reviewedAt   DateTime?
+  reviewNote   String?
+  createdAt    DateTime         @default(now())
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, deviceId, opId])
+  @@index([tenantId, status, createdAt])
 }

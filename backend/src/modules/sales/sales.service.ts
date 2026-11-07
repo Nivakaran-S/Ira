@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import {
-  cashRound, type CreateRefundSchema, type CreateSaleSchema, type Permission, type PricingLineInput,
+  cashRound, type CreateRefundSchema, type CreateSaleSchema, type Discount, type PaymentMethodKey, type Permission, type PricingResult, type PricingLineInput,
   priceSale, prorate, type TenantSettings,
 } from '@pos/shared';
 import type { z } from 'zod';
@@ -12,7 +12,7 @@ import { TenantDb } from '../../infra/tenant-db.service.js';
 import { CapabilitiesService } from '../access/capabilities.service.js';
 import { StepUpGate } from '../access/step-up-gate.js';
 import { auditContext } from '../audit/audit-context.js';
-import { AuditService } from '../audit/audit.service.js';
+import { type AuditEntry, AuditService } from '../audit/audit.service.js';
 import { productInclude, taxStack } from '../catalog/catalog.service.js';
 import { InventoryService, type StockChange } from '../inventory/inventory.service.js';
 import { SettingsService } from '../settings/settings.service.js';
@@ -37,6 +37,110 @@ const pad = (n: number) => String(n).padStart(6, '0');
 
 /** Exceeds the tenant's step-up threshold: amount / base > thresholdBp / 10000. */
 const overThreshold = (amount: number, base: number, thresholdBp: number) => amount > 0 && amount * 10_000 > thresholdBp * base;
+
+export interface RefundLineCalc {
+  saleLineId: string;
+  productId: string;
+  qtyMilli: number;
+  refundedBefore: number;
+  net: number;
+  tax: number;
+  total: number;
+}
+
+export interface RefundRecord {
+  id: string;
+  saleId: string;
+  storeId: string;
+  registerId: string;
+  shiftId: string;
+  deviceId: string;
+  userId: string;
+  approvedById: string | null;
+  receiptNo: string;
+  method: PaymentMethodKey;
+  reason: string;
+  restock: boolean;
+  lines: RefundLineCalc[];
+  total: number;
+  taxTotal: number;
+  paidOut: number;
+  offline: boolean;
+  /** Online refunds check the drawer holds the cash; offline ones are facts already paid out. */
+  checkDrawer: boolean;
+}
+
+export interface SettledPayment {
+  method: PaymentMethodKey;
+  amount: number;
+  tendered: number | null;
+  change: number;
+  reference?: string;
+}
+
+export interface SaleRecord {
+  id: string;
+  storeId: string;
+  registerId: string;
+  shiftId: string;
+  deviceId: string;
+  cashierId: string;
+  receiptNo: string;
+  pricesIncludeTax: boolean;
+  priced: PricingResult;
+  due: number;
+  payments: SettledPayment[];
+  cartDiscount?: Discount;
+  approvals: Approval[];
+  soldAt: Date;
+  offline: boolean;
+  catalogVersion: bigint | null;
+  lines: { productId: string; name: string; sku: string | null; unitPrice: number; listPrice: number; qtyMilli: number; note?: string; trackStock: boolean }[];
+}
+
+/** Payments must add up to the amount due exactly; cash may be over-tendered and gives change. */
+export function settlePayments(payments: { method: PaymentMethodKey; amount: number; tendered?: number; reference?: string }[], due: number): SettledPayment[] {
+  const paid = payments.reduce((s, p) => s + p.amount, 0);
+  if (paid !== due) throw new AppError('PAYMENT_MISMATCH', 400, 'Payments must add up to the amount due', { due, paid });
+  return payments.map((p) => {
+    if (p.method !== 'CASH') return { ...p, tendered: null, change: 0 };
+    const tendered = p.tendered ?? p.amount;
+    if (tendered < p.amount) throw new AppError('PAYMENT_MISMATCH', 400, 'Cash tendered is less than the amount', { amount: p.amount, tendered });
+    return { ...p, tendered, change: tendered - p.amount };
+  });
+}
+
+/**
+ * Which manager approvals a sale needs. Price overrides always do; discounts do when the cashier
+ * lacks discount.apply or exceeds the tenant threshold (force: even holders need a second person).
+ */
+export function approvalNeeds(
+  perms: Set<Permission>,
+  settings: TenantSettings,
+  lines: { unitPrice: number; listPrice: number; discount?: Discount }[],
+  cartDiscount: Discount | undefined,
+  priced: PricingResult,
+): { action: Permission; force: boolean }[] {
+  const needs: { action: Permission; force: boolean }[] = [];
+  const threshold = settings.stepUp.discountAboveBp;
+  if (lines.some((l) => l.unitPrice !== l.listPrice)) needs.push({ action: 'price.override', force: true });
+  let anyDiscount = false;
+  let over = false;
+  lines.forEach((l, i) => {
+    if (!l.discount) return;
+    anyDiscount = true;
+    const pl = priced.lines[i];
+    if (overThreshold(pl.discounts[0] ?? 0, pl.gross, threshold)) over = true;
+  });
+  if (cartDiscount) {
+    anyDiscount = true;
+    const cartAmount = priced.lines.reduce((s, l) => s + (l.discounts[l.discounts.length - 1] ?? 0), 0);
+    const base = priced.lines.reduce((s, l, i) => s + l.gross - (lines[i].discount ? (l.discounts[0] ?? 0) : 0), 0);
+    if (overThreshold(cartAmount, base, threshold)) over = true;
+  }
+  if (anyDiscount && (over || !perms.has('discount.apply'))) needs.push({ action: 'discount.apply', force: over });
+  return needs;
+}
 
 @Injectable()
 export class SalesService {
@@ -113,91 +217,67 @@ export class SalesService {
     const priced = priceSale({ pricesIncludeTax: settings.pricesIncludeTax, lines: pricingLines, cartDiscounts: input.cartDiscount ? [input.cartDiscount] : [] });
 
     const approvals: Approval[] = [];
-    await this.checkApprovals(req, perms, settings, input, byId, priced, approvals);
+    const saleLines = input.lines.map((l) => ({ ...l, listPrice: byId.get(l.productId)!.price, unitPrice: l.unitPrice ?? byId.get(l.productId)!.price }));
+    for (const n of approvalNeeds(perms, settings, saleLines, input.cartDiscount, priced)) await this.authorize(req, perms, n.action, n.force, approvals);
 
     const allCash = input.payments.every((p) => p.method === 'CASH');
     const due = allCash ? cashRound(priced.totals.total, settings.cashRoundingUnit) : priced.totals.total;
     if (input.expectedTotal !== due) {
       throw new AppError('TOTAL_MISMATCH', 409, 'The till and the server disagree on the total', { expected: input.expectedTotal, actual: due });
     }
-    const paid = input.payments.reduce((s, p) => s + p.amount, 0);
-    if (paid !== due) throw new AppError('PAYMENT_MISMATCH', 400, 'Payments must add up to the amount due', { due, paid });
-    const payments = input.payments.map((p) => {
-      if (p.method !== 'CASH') return { ...p, tendered: null, change: 0 };
-      const tendered = p.tendered ?? p.amount;
-      if (tendered < p.amount) throw new AppError('PAYMENT_MISMATCH', 400, 'Cash tendered is less than the amount', { amount: p.amount, tendered });
-      return { ...p, tendered, change: tendered - p.amount };
-    });
+    const payments = settlePayments(input.payments, due);
 
     return this.tenantDb.run(tenant.id, async (tx) => {
       const shift = await this.shifts.requireOpenShift(tx, device.registerId);
       const receiptNo = await this.nextReceiptNo(tx, device.registerId);
-      await tx.sale.create({
-        data: {
-          id: input.id, tenantId: tenant.id, storeId: shift.storeId, registerId: device.registerId, shiftId: shift.id, deviceId: device.id,
-          cashierId, receiptNo, pricesIncludeTax: settings.pricesIncludeTax,
-          subtotal: priced.totals.subtotal, discountTotal: priced.totals.discountTotal, taxTotal: priced.totals.taxTotal, total: priced.totals.total,
-          rounding: due - priced.totals.total, due, change: payments.reduce((s, p) => s + p.change, 0),
-          taxes: json(priced.taxes), cartDiscount: input.cartDiscount ? json(input.cartDiscount) : Prisma.DbNull, approvals: json(approvals),
-          soldAt: new Date(),
-          lines: {
-            create: priced.lines.map((l, i) => {
-              const src = input.lines[i];
-              const p = byId.get(src.productId)!;
-              return {
-                position: i, productId: p.id, name: p.name, sku: p.sku, unitPrice: pricingLines[i].unitPrice, listPrice: p.price,
-                qtyMilli: src.qtyMilli, gross: l.gross, discount: l.discount, discounts: json(l.discounts), net: l.net, tax: l.tax,
-                taxes: json(l.taxes), total: l.total, note: src.note ?? null,
-              };
-            }),
-          },
-          payments: {
-            create: payments.map((p) => ({ method: p.method, amount: p.amount, tendered: p.tendered, change: p.change, reference: p.reference ?? null })),
-          },
-        },
-      });
-      const stock: StockChange[] = input.lines
-        .filter((l) => byId.get(l.productId)!.trackStock)
-        .map((l) => ({ storeId: shift.storeId, productId: l.productId, deltaMilli: -l.qtyMilli, reason: 'SALE', refType: 'Sale', refId: input.id, userId: cashierId }));
-      await this.inventory.apply(tx, tenant.id, stock);
-      await this.audit.record(tx, tenant.id, {
-        ...auditContext(req), action: 'sale.completed', entityType: 'Sale', entityId: input.id,
-        after: { receiptNo, total: priced.totals.total, due, lines: input.lines.length, approvals },
-      });
+      await this.persistSale(tx, tenant.id, {
+        id: input.id, storeId: shift.storeId, registerId: device.registerId, shiftId: shift.id, deviceId: device.id, cashierId, receiptNo,
+        pricesIncludeTax: settings.pricesIncludeTax, priced, due, payments, cartDiscount: input.cartDiscount, approvals, soldAt: new Date(),
+        offline: false, catalogVersion: null,
+        lines: input.lines.map((l) => {
+          const p = byId.get(l.productId)!;
+          return { productId: p.id, name: p.name, sku: p.sku, unitPrice: l.unitPrice ?? p.price, listPrice: p.price, qtyMilli: l.qtyMilli, note: l.note, trackStock: p.trackStock };
+        }),
+      }, auditContext(req));
       return (await this.getSale(tx, input.id))!;
     });
   }
 
-  private async checkApprovals(
-    req: RequestWithContext,
-    perms: Set<Permission>,
-    settings: TenantSettings,
-    input: SaleInput,
-    products: Map<string, { price: number }>,
-    priced: ReturnType<typeof priceSale>,
-    out: Approval[],
-  ) {
-    const threshold = settings.stepUp.discountAboveBp;
-    if (input.lines.some((l) => l.unitPrice !== undefined && l.unitPrice !== products.get(l.productId)!.price)) {
-      // Price overrides always need a manager, even for staff who hold price.override themselves.
-      await this.authorize(req, perms, 'price.override', true, out);
-    }
-    let lineDiscountOver = false;
-    let anyDiscount = false;
-    input.lines.forEach((l, i) => {
-      if (!l.discount) return;
-      anyDiscount = true;
-      const pl = priced.lines[i];
-      if (overThreshold(pl.discounts[0] ?? 0, pl.gross, threshold)) lineDiscountOver = true;
+  /** Writes a priced, paid sale with its lines, payments, stock movements and audit event. */
+  async persistSale(tx: Tx, tenantId: string, r: SaleRecord, ctx: Partial<AuditEntry>) {
+    await tx.sale.create({
+      data: {
+        id: r.id, tenantId, storeId: r.storeId, registerId: r.registerId, shiftId: r.shiftId, deviceId: r.deviceId,
+        cashierId: r.cashierId, receiptNo: r.receiptNo, pricesIncludeTax: r.pricesIncludeTax,
+        subtotal: r.priced.totals.subtotal, discountTotal: r.priced.totals.discountTotal, taxTotal: r.priced.totals.taxTotal, total: r.priced.totals.total,
+        rounding: r.due - r.priced.totals.total, due: r.due, change: r.payments.reduce((s, p) => s + p.change, 0),
+        taxes: json(r.priced.taxes), cartDiscount: r.cartDiscount ? json(r.cartDiscount) : Prisma.DbNull, approvals: json(r.approvals),
+        soldAt: r.soldAt, offline: r.offline, catalogVersion: r.catalogVersion,
+        lines: {
+          create: r.priced.lines.map((l, i) => {
+            const src = r.lines[i];
+            return {
+              position: i, productId: src.productId, name: src.name, sku: src.sku, unitPrice: src.unitPrice, listPrice: src.listPrice,
+              qtyMilli: src.qtyMilli, gross: l.gross, discount: l.discount, discounts: json(l.discounts), net: l.net, tax: l.tax,
+              taxes: json(l.taxes), total: l.total, note: src.note ?? null,
+            };
+          }),
+        },
+        payments: {
+          create: r.payments.map((p) => ({ method: p.method, amount: p.amount, tendered: p.tendered, change: p.change, reference: p.reference ?? null })),
+        },
+      },
     });
-    let cartOver = false;
-    if (input.cartDiscount) {
-      anyDiscount = true;
-      const cartAmount = priced.lines.reduce((s, l) => s + (l.discounts[l.discounts.length - 1] ?? 0), 0);
-      const base = priced.lines.reduce((s, l, i) => s + l.gross - (input.lines[i].discount ? (l.discounts[0] ?? 0) : 0), 0);
-      cartOver = overThreshold(cartAmount, base, threshold);
-    }
-    if (anyDiscount) await this.authorize(req, perms, 'discount.apply', lineDiscountOver || cartOver, out);
+    await this.inventory.apply(
+      tx, tenantId,
+      r.lines.filter((l) => l.trackStock).map((l) => ({
+        storeId: r.storeId, productId: l.productId, deltaMilli: -l.qtyMilli, reason: 'SALE' as const, refType: 'Sale', refId: r.id, userId: r.cashierId,
+      })),
+    );
+    await this.audit.record(tx, tenantId, {
+      ...ctx, action: 'sale.completed', entityType: 'Sale', entityId: r.id,
+      after: { receiptNo: r.receiptNo, total: r.priced.totals.total, due: r.due, lines: r.lines.length, approvals: r.approvals, ...(r.offline ? { offline: true } : {}) },
+    });
   }
 
   /** Voids are only allowed while the sale's shift is still open on this register. */
@@ -254,51 +334,63 @@ export class SalesService {
 
     return this.tenantDb.run(tenant.id, async (tx) => {
       const shift = await this.shifts.requireOpenShift(tx, device.registerId);
-      // Optimistic lock on each line: amounts were computed against refundedBefore, so a concurrent refund aborts this one.
-      for (const l of lines) {
-        const updated = await tx.saleLine.updateMany({
-          where: { id: l.saleLineId, refundedQtyMilli: l.refundedBefore },
-          data: { refundedQtyMilli: { increment: l.qtyMilli } },
-        });
-        if (updated.count !== 1) throw AppError.conflict('This line was refunded meanwhile; reload the sale');
-      }
-      if (input.method === 'CASH') {
-        const { cash } = await this.shifts.report(tx, shift.id);
-        if (paidOut > cash.expected) throw new AppError('INVALID_STATE', 409, 'The drawer does not hold enough cash for this refund');
-      }
       const receiptNo = await this.nextReceiptNo(tx, device.registerId, 'R');
-      const refund = await tx.refund.create({
-        data: {
-          id: input.id, tenantId: tenant.id, saleId: sale.id, storeId: shift.storeId, registerId: device.registerId, shiftId: shift.id,
-          deviceId: device.id, userId, approvedById, receiptNo, method: input.method, reason: input.reason, restock: input.restock,
-          total, taxTotal, rounding: paidOut - total,
-          lines: { create: lines.map((l) => ({ saleLineId: l.saleLineId, qtyMilli: l.qtyMilli, net: l.net, tax: l.tax, total: l.total })) },
-        },
-        include: { lines: true },
-      });
-      if (input.restock) {
-        const tracked = await tx.product.findMany({ where: { id: { in: lines.map((l) => l.productId) }, trackStock: true }, select: { id: true } });
-        const trackedIds = new Set(tracked.map((p) => p.id));
-        await this.inventory.apply(
-          tx, tenant.id,
-          lines.filter((l) => trackedIds.has(l.productId)).map((l) => ({
-            storeId: shift.storeId, productId: l.productId, deltaMilli: l.qtyMilli, reason: 'REFUND', refType: 'Refund', refId: refund.id, userId,
-          })),
-        );
-      }
-      await this.audit.record(tx, tenant.id, {
-        ...auditContext(req), action: 'sale.refunded', entityType: 'Sale', entityId: sale.id,
-        after: { refundId: refund.id, receiptNo, total, paidOut, method: input.method, reason: input.reason, approvedById },
-      });
-      return refund;
+      return this.persistRefund(tx, tenant.id, {
+        id: input.id, saleId: sale.id, storeId: shift.storeId, registerId: device.registerId, shiftId: shift.id, deviceId: device.id,
+        userId, approvedById, receiptNo, method: input.method, reason: input.reason, restock: input.restock, lines, total, taxTotal, paidOut,
+        offline: false, checkDrawer: true,
+      }, auditContext(req));
     });
+  }
+
+  /** Writes a refund: locks and bumps the refunded quantities, restocks, audits. */
+  async persistRefund(tx: Tx, tenantId: string, r: RefundRecord, ctx: Partial<AuditEntry>) {
+    // Optimistic lock on each line: amounts were computed against refundedBefore, so a concurrent refund aborts this one.
+    for (const l of r.lines) {
+      const updated = await tx.saleLine.updateMany({
+        where: { id: l.saleLineId, refundedQtyMilli: l.refundedBefore },
+        data: { refundedQtyMilli: { increment: l.qtyMilli } },
+      });
+      if (updated.count !== 1) throw AppError.conflict('This line was refunded meanwhile; reload the sale');
+    }
+    if (r.checkDrawer && r.method === 'CASH') {
+      const { cash } = await this.shifts.report(tx, r.shiftId);
+      if (r.paidOut > cash.expected) throw new AppError('INVALID_STATE', 409, 'The drawer does not hold enough cash for this refund');
+    }
+    const refund = await tx.refund.create({
+      data: {
+        id: r.id, tenantId, saleId: r.saleId, storeId: r.storeId, registerId: r.registerId, shiftId: r.shiftId,
+        deviceId: r.deviceId, userId: r.userId, approvedById: r.approvedById, receiptNo: r.receiptNo, method: r.method, reason: r.reason,
+        restock: r.restock, total: r.total, taxTotal: r.taxTotal, rounding: r.paidOut - r.total, offline: r.offline,
+        lines: { create: r.lines.map((l) => ({ saleLineId: l.saleLineId, qtyMilli: l.qtyMilli, net: l.net, tax: l.tax, total: l.total })) },
+      },
+      include: { lines: true },
+    });
+    if (r.restock) {
+      const tracked = await tx.product.findMany({ where: { id: { in: r.lines.map((l) => l.productId) }, trackStock: true }, select: { id: true } });
+      const trackedIds = new Set(tracked.map((p) => p.id));
+      await this.inventory.apply(
+        tx, tenantId,
+        r.lines.filter((l) => trackedIds.has(l.productId)).map((l) => ({
+          storeId: r.storeId, productId: l.productId, deltaMilli: l.qtyMilli, reason: 'REFUND' as const, refType: 'Refund', refId: refund.id, userId: r.userId,
+        })),
+      );
+    }
+    await this.audit.record(tx, tenantId, {
+      ...ctx, action: 'sale.refunded', entityType: 'Sale', entityId: r.saleId,
+      after: {
+        refundId: refund.id, receiptNo: r.receiptNo, total: r.total, paidOut: r.paidOut, method: r.method, reason: r.reason,
+        approvedById: r.approvedById, ...(r.offline ? { offline: true } : {}),
+      },
+    });
+    return refund;
   }
 
   /**
    * Money per refunded line, proportional to the original line. Refunding what is left of a line
    * takes exactly what is left, so a line refunded in parts never refunds a minor unit more or less.
    */
-  private refundLines(sale: SaleWithLines, input: RefundInput) {
+  refundLines(sale: SaleWithLines, input: Pick<RefundInput, 'lines'>): RefundLineCalc[] {
     const byId = new Map(sale.lines.map((l) => [l.id, l]));
     const seen = new Set<string>();
     return input.lines.map((r) => {

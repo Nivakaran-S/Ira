@@ -20,6 +20,18 @@ export const TenantSettingsSchema = z.object({
       discountAboveBp: z.int().min(0).max(10_000).default(1_000),
     })
     .prefault({}),
+  offline: z
+    .object({
+      /** Tills keep selling when the API is unreachable. */
+      enabled: z.boolean().default(true),
+      /** Hard stop: no offline sales this long after the last successful sync. */
+      maxHours: z.int().min(1).max(168).default(24),
+      /** Largest refund a till may give offline (minor units). 0 = no offline refunds. */
+      maxRefund: z.int().min(0).default(0),
+      /** Card payments offline (only with a terminal that works offline). */
+      allowCard: z.boolean().default(false),
+    })
+    .prefault({}),
 });
 
 export type TenantSettings = z.infer<typeof TenantSettingsSchema>;

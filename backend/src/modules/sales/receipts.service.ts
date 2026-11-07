@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { formatMinor, formatQty, type ReceiptDoc } from '@pos/shared';
+import { buildSaleReceipt, formatMinor, formatQty, formatWhen, type ReceiptDoc } from '@pos/shared';
 import { AppError } from '../../common/errors/app-error.js';
 import type { TenantContext } from '../../common/request-context.js';
 import { TenantDb } from '../../infra/tenant-db.service.js';
@@ -7,11 +7,6 @@ import { SettingsService } from '../settings/settings.service.js';
 import { saleInclude } from './sales.service.js';
 
 const METHOD_LABEL: Record<string, string> = { CASH: 'Cash', CARD: 'Card', OTHER: 'Other' };
-const pct = (bp: number) => `${(bp / 100).toFixed(bp % 100 ? 2 : 0)}%`;
-
-function when(d: Date, timezone: string) {
-  return new Intl.DateTimeFormat('en-GB', { timeZone: timezone, dateStyle: 'medium', timeStyle: 'short' }).format(d);
-}
 
 const lines = (text: string) => text.split(/\r?\n/).map((l) => l.trimEnd()).filter(Boolean);
 
@@ -34,44 +29,32 @@ export class ReceiptsService {
       ]);
       return { sale, store, register, cashier };
     });
-    const c = profile.currency;
-    const m = (n: number) => formatMinor(n, c);
     const r = profile.settings.receipt;
-    const totals: ReceiptDoc['totals'] = [{ label: 'Subtotal', value: m(sale.subtotal) }];
-    if (sale.discountTotal) totals.push({ label: 'Discounts', value: `-${m(sale.discountTotal)}` });
-    if (!sale.pricesIncludeTax && sale.taxTotal) totals.push({ label: 'Tax', value: m(sale.taxTotal) });
-    if (sale.rounding) totals.push({ label: 'Rounding', value: m(sale.rounding) });
-    totals.push({ label: `TOTAL ${c}`, value: m(sale.due), bold: true });
-    const taxes = (sale.taxes as { name: string; rateBp: number; amount: number }[]) ?? [];
-    return {
-      currency: c,
-      header: [profile.name, ...(store ? [store.name] : []), ...lines(r.header)],
-      title: sale.status === 'VOIDED' ? 'VOIDED' : copy ? 'RECEIPT (COPY)' : 'RECEIPT',
-      meta: [
-        { label: 'Receipt', value: sale.receiptNo },
-        { label: 'Date', value: when(sale.soldAt, profile.timezone) },
-        { label: 'Register', value: register?.code ?? '' },
-        { label: 'Cashier', value: cashier?.name ?? '' },
-      ],
-      lines: sale.lines.map((l) => ({
-        name: l.name,
-        qty: formatQty(l.qtyMilli),
-        unitPrice: m(l.unitPrice),
-        total: m(l.net),
-        ...(l.discount ? { discount: `-${m(l.discount)}` } : {}),
-        ...(l.note ? { note: l.note } : {}),
-      })),
-      totals,
-      taxes: r.showTaxBreakdown
-        ? taxes.map((t) => ({ label: `${t.name} ${pct(t.rateBp)}${sale.pricesIncludeTax ? ' (incl.)' : ''}`, value: m(t.amount) }))
-        : [],
-      payments: [
-        ...sale.payments.map((p) => ({ label: METHOD_LABEL[p.method] ?? p.method, value: m(p.tendered ?? p.amount) })),
-        ...(sale.change ? [{ label: 'Change', value: m(sale.change) }] : []),
-      ],
-      footer: lines(r.footer),
-      barcode: sale.receiptNo,
-    };
+    return buildSaleReceipt({
+      currency: profile.currency,
+      timezone: profile.timezone,
+      tenantName: profile.name,
+      storeName: store?.name,
+      header: r.header,
+      footer: r.footer,
+      showTaxBreakdown: r.showTaxBreakdown,
+      receiptNo: sale.receiptNo,
+      soldAt: sale.soldAt,
+      registerCode: register?.code ?? '',
+      cashierName: cashier?.name ?? '',
+      status: sale.status,
+      copy,
+      pricesIncludeTax: sale.pricesIncludeTax,
+      lines: sale.lines,
+      subtotal: sale.subtotal,
+      discountTotal: sale.discountTotal,
+      taxTotal: sale.taxTotal,
+      rounding: sale.rounding,
+      due: sale.due,
+      change: sale.change,
+      taxes: (sale.taxes as { name: string; rateBp: number; amount: number }[]) ?? [],
+      payments: sale.payments,
+    });
   }
 
   async forRefund(tenant: TenantContext, refundId: string): Promise<ReceiptDoc> {
@@ -94,7 +77,7 @@ export class ReceiptsService {
       meta: [
         { label: 'Refund', value: refund.receiptNo },
         { label: 'Original', value: refund.sale.receiptNo },
-        { label: 'Date', value: when(refund.createdAt, profile.timezone) },
+        { label: 'Date', value: formatWhen(refund.createdAt, profile.timezone) },
         { label: 'By', value: user?.name ?? '' },
         { label: 'Reason', value: refund.reason },
       ],

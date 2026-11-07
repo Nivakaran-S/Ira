@@ -17,6 +17,7 @@ export const PERMISSIONS = [
   'report.view',
   'catalog.manage',
   'settings.manage',
+  'sync.review',
 ] as const;
 
 export type Permission = (typeof PERMISSIONS)[number];

@@ -12,3 +12,5 @@ export * from './schemas/settings.js';
 export * from './schemas/catalog.js';
 export * from './schemas/sales.js';
 export * from './uuid.js';
+export * from './sync.js';
+export * from './receipt-builder.js';
