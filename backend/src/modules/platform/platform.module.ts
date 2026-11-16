@@ -24,7 +24,7 @@ import { TenantsService } from './tenants.service.js';
 function billingGateway(env: Env) {
   switch (env.BILLING_GATEWAY) {
     case 'sandbox':
-      return new SandboxGateway();
+      return new SandboxGateway({ webhookDelayMs: env.SANDBOX_WEBHOOK_DELAY_MS });
     case 'payhere':
       return new PayHereGateway({
         merchantId: env.PAYHERE_MERCHANT_ID!, merchantSecret: env.PAYHERE_MERCHANT_SECRET!, sandbox: env.PAYHERE_SANDBOX, notifyUrl: env.PAYHERE_NOTIFY_URL!,

@@ -3,7 +3,7 @@ import type { NestExpressApplication } from '@nestjs/platform-express';
 import { type OfflineOp, PERMISSIONS } from '@pos/shared';
 import request from 'supertest';
 import { v7 as uuidv7 } from 'uuid';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createTestApp } from './helpers/app.js';
 import { ownerDb, resetDb } from './helpers/db.js';
 import { enrollTestDevice, type TestDevice } from './helpers/device.js';
@@ -11,6 +11,7 @@ import { ADMIN_HOST, createRegister, createStore, createSuperAdmin, createTenant
 import { bearer, loginPassword, loginSuperAdmin } from './helpers/http.js';
 import { BILLING_GATEWAY } from '../src/modules/platform/payments/billing-gateway.js';
 import { PayHereGateway } from '../src/modules/platform/payments/payhere-gateway.js';
+import { SandboxGateway } from '../src/modules/platform/payments/sandbox-gateway.js';
 import { Outbox } from './helpers/outbox.js';
 import { flushRedis } from './helpers/redis.js';
 import { createProduct, setSettings, TestTill } from './helpers/till.js';
@@ -220,7 +221,8 @@ describe('online invoice payment (sandbox gateway)', () => {
     expect(page.text).toContain('15,000.00');
     expect(page.text).toContain(inv.number);
 
-    const paid = await http().post(`/api/billing/sandbox/checkout/${session(url)}/pay?return=/billing`).set('Host', host).type('form').send({ go: '1' }).expect(303);
+    expect(page.text).toContain('4242 4242 4242 4242');
+    const paid = await http().post(`/api/billing/sandbox/checkout/${session(url)}/card?return=/billing`).set('Host', host).type('form').send({ number: '4242 4242 4242 4242', expiry: '12 / 40', cvc: '123', name: 'Niva S' }).expect(303);
     expect(paid.headers.location).toBe('/billing?payment=success');
     const after = (await asOwner(http().get('/api/billing')).expect(200)).body;
     expect(after.suspendedForBilling).toBe(false);
@@ -229,16 +231,87 @@ describe('online invoice payment (sandbox gateway)', () => {
     await asOwner(http().get('/api/stores')).expect(200);
 
     // Resending the outcome does nothing more.
-    await http().post(`/api/billing/sandbox/checkout/${session(url)}/pay`).set('Host', host).type('form').send({}).expect(303);
+    const again = await http().post(`/api/billing/sandbox/checkout/${session(url)}/card`).set('Host', host).type('form').send({ number: '4242 4242 4242 4242', expiry: '12 / 40', cvc: '123', name: 'Niva S' }).expect(303);
+    expect(again.headers.location).toBe('/billing?payment=success');
     expect(await ownerDb().billingPayment.count({ where: { status: 'SUCCEEDED' } })).toBe(1);
   });
 
-  it('a declined card leaves the invoice due; only billing.pay may start a checkout; webhooks need the signature', async () => {
+  const checkout = async () => {
     const inv = await due();
     const { url } = (await asOwner(http().post(`/api/billing/invoices/${inv.id}/checkout`)).expect(200)).body;
-    const back = await http().post(`/api/billing/sandbox/checkout/${session(url)}/decline?return=//evil.example`).set('Host', host).type('form').send({}).expect(303);
-    expect(back.headers.location).toBe('/billing?payment=failed');
-    expect(await due()).toMatchObject({ status: 'DUE', lastPayment: { status: 'FAILED', failureReason: 'Card declined' } });
+    return { inv, url, sid: session(url) };
+  };
+  const post = (sid: string, step: string, form: Record<string, string>, ret = '/billing') =>
+    http().post(`/api/billing/sandbox/checkout/${sid}/${step}?return=${ret}`).set('Host', host).type('form').send(form);
+
+  it('a bad card number is refused on the form; a declined card can be retried with another', async () => {
+    const { sid } = await checkout();
+    const bad = await post(sid, 'card', { number: '4242 4242 4242 4241', expiry: '12 / 40', cvc: '123', name: 'N' }).expect(200);
+    expect(bad.text).toContain('Your card number is invalid.');
+    const broke = await post(sid, 'card', { number: '4000 0000 0000 9995', expiry: '12 / 40', cvc: '123', name: 'N' }).expect(200);
+    expect(broke.text).toContain('insufficient funds');
+    expect(await due()).toMatchObject({ status: 'DUE', lastPayment: { status: 'PENDING' } });
+    const ok = await post(sid, 'card', { number: '5555 5555 5555 4444', expiry: '12 / 40', cvc: '123', name: 'N' }).expect(303);
+    expect(ok.headers.location).toBe('/billing?payment=success');
+    expect((await due()).status).toBe('PAID');
+  });
+
+  it('three declines abandon the checkout', async () => {
+    const { sid } = await checkout();
+    const f = { number: '4000 0000 0000 0002', expiry: '12 / 40', cvc: '123', name: 'N' };
+    await post(sid, 'card', f).expect(200);
+    await post(sid, 'card', f).expect(200);
+    expect((await post(sid, 'card', f).expect(303)).headers.location).toBe('/billing?payment=failed');
+    expect(await due()).toMatchObject({ status: 'DUE', lastPayment: { status: 'FAILED', failureReason: 'Your card was declined.' } });
+  });
+
+  it('3-D Secure asks for a code: a wrong one retries, the right one pays, three wrong ones fail', async () => {
+    const sca = { number: '4000 0025 0000 3155', expiry: '12 / 40', cvc: '123', name: 'N' };
+    const a = await checkout();
+    expect((await post(a.sid, 'card', sca).expect(303)).headers.location).toContain(`/checkout/${a.sid}`);
+    expect((await http().get(a.url).set('Host', host).expect(200)).text).toContain('Confirm it is you');
+    expect((await post(a.sid, '3ds', { code: '000000' }).expect(200)).text).toContain('That code is not right');
+    expect((await post(a.sid, '3ds', { code: '123456' }).expect(303)).headers.location).toBe('/billing?payment=success');
+    expect((await due()).status).toBe('PAID');
+
+    await ownerDb().invoice.updateMany({ data: { status: 'DUE', paidAt: null, paidRef: null } });
+    const b = await checkout();
+    await post(b.sid, 'card', sca).expect(303);
+    await post(b.sid, '3ds', { code: '1' }).expect(200);
+    await post(b.sid, '3ds', { code: '2' }).expect(200);
+    expect((await post(b.sid, '3ds', { code: '3' }).expect(303)).headers.location).toBe('/billing?payment=failed');
+    expect((await due()).lastPayment).toMatchObject({ status: 'FAILED', failureReason: 'Card authentication failed' });
+  });
+
+  it('with a delay the browser comes back first, the webhook lands later, and the duplicate changes nothing', async () => {
+    const gw = app.get<SandboxGateway>(BILLING_GATEWAY);
+    const options = gw.options as { webhookDelayMs: number };
+    options.webhookDelayMs = 300;
+    try {
+      const { sid } = await checkout();
+      const back = await post(sid, 'card', { number: '4242 4242 4242 4242', expiry: '12 / 40', cvc: '123', name: 'N' }).expect(303);
+      expect(back.headers.location).toBe('/billing?payment=submitted');
+      expect((await due()).status).toBe('DUE');
+      await vi.waitFor(async () => expect((await due()).status).toBe('PAID'), { timeout: 5000, interval: 100 });
+      await new Promise((r) => setTimeout(r, 300)); // the second delivery
+      expect(await ownerDb().billingPayment.count({ where: { status: 'SUCCEEDED' } })).toBe(1);
+    } finally {
+      options.webhookDelayMs = 0;
+    }
+  });
+
+  it('cancelling records a failed attempt and returns to the billing page', async () => {
+    const { sid } = await checkout();
+    expect((await post(sid, 'cancel', {}).expect(303)).headers.location).toBe('/billing?payment=cancelled');
+    expect(await due()).toMatchObject({ status: 'DUE', lastPayment: { status: 'FAILED', failureReason: 'Cancelled by the payer' } });
+  });
+
+  it('a cancelled checkout leaves the invoice due; only billing.pay may start a checkout; webhooks need the signature', async () => {
+    const inv = await due();
+    const { url } = (await asOwner(http().post(`/api/billing/invoices/${inv.id}/checkout`)).expect(200)).body;
+    const back = await http().post(`/api/billing/sandbox/checkout/${session(url)}/cancel?return=//evil.example`).set('Host', host).type('form').send({}).expect(303);
+    expect(back.headers.location).toBe('/billing?payment=cancelled');
+    expect((await due()).status).toBe('DUE');
 
     const clerk = await loginPassword(app, 'shop', 'clerk@shop.lk', PW);
     await http().post(`/api/billing/invoices/${inv.id}/checkout`).set('Host', host).set(bearer(clerk)).expect(403);

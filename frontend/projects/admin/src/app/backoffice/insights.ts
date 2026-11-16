@@ -3,6 +3,7 @@ import { ChangeDetectionStrategy, Component, inject, signal } from '@angular/cor
 import { firstValueFrom } from 'rxjs';
 import { apiResource, humanMessage, toApiError, ToastService, UiBadge, UiEmpty } from 'ui';
 import { BackofficeApi } from './backoffice-api';
+import { localDate } from './local-date';
 import { Money } from './money';
 
 type By = 'store' | 'category' | 'cashier' | 'hour' | 'product';
@@ -97,8 +98,8 @@ export class Insights {
   protected readonly money = inject(Money);
   protected readonly byOptions = BY;
   protected readonly by = signal<By>('product');
-  protected readonly from = signal(new Date(Date.now() - 29 * 86_400_000).toISOString().slice(0, 10));
-  protected readonly to = signal(new Date().toISOString().slice(0, 10));
+  protected readonly from = signal(localDate(new Date(Date.now() - 29 * 86_400_000)));
+  protected readonly to = signal(localDate(new Date()));
   protected readonly storeId = signal('');
   protected readonly stores = apiResource({
     loader: async () => {

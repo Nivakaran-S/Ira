@@ -2,9 +2,9 @@ import { DatePipe } from '@angular/common';
 import { ChangeDetectionStrategy, Component, inject, signal } from '@angular/core';
 import { apiResource, humanMessage, toApiError, ToastService, UiBadge, UiDialog, UiEmpty } from 'ui';
 import { CommerceApi, type SaleDetail } from './commerce-api';
+import { localDate } from './local-date';
 import { Money } from './money';
 
-const startOfDay = (d = new Date()) => new Date(d.getFullYear(), d.getMonth(), d.getDate());
 const METHOD: Record<string, string> = { CASH: 'Cash', CARD: 'Card', OTHER: 'Other' };
 
 @Component({
@@ -79,8 +79,8 @@ export class Sales {
   protected readonly money = inject(Money);
   protected readonly method = METHOD;
 
-  protected readonly from = signal(startOfDay(new Date(Date.now() - 6 * 86_400_000)).toISOString().slice(0, 10));
-  protected readonly to = signal(new Date().toISOString().slice(0, 10));
+  protected readonly from = signal(localDate(new Date(Date.now() - 6 * 86_400_000)));
+  protected readonly to = signal(localDate(new Date()));
   protected readonly receiptNo = signal('');
   protected readonly list = apiResource({
     loader: () => {

@@ -167,7 +167,18 @@ test('Milestone 8: a whole shift offline with a customer, terminal cards, refund
   await owner.getByTestId('pay-invoice').click();
   await expect(owner.getByText('Sandbox payment gateway')).toBeVisible();
   await expect(owner.getByRole('heading', { name: /Pay 9,000\.00 LKR/ })).toBeVisible();
-  await owner.getByRole('button', { name: 'Pay now' }).click();
+  await owner.getByLabel('Card number').fill('4000 0000 0000 9995');
+  await owner.getByLabel('Expiry').fill('12 / 40');
+  await owner.getByLabel('Security code').fill('123');
+  await owner.getByLabel('Name on card').fill('Niva S');
+  await owner.getByRole('button', { name: /^Pay 9,000\.00/ }).click();
+  await expect(owner.getByTestId('sandbox-error')).toContainText('insufficient funds');
+  await owner.getByLabel('Card number').fill('4000 0025 0000 3155');
+  await owner.getByLabel('Expiry').fill('12 / 40');
+  await owner.getByLabel('Security code').fill('123');
+  await owner.getByRole('button', { name: /^Pay 9,000\.00/ }).click();
+  await owner.getByLabel('One-time code').fill('123456');
+  await owner.getByRole('button', { name: 'Confirm' }).click();
   await expect(owner.getByTestId('payment-success')).toBeVisible();
   await expect(owner.getByText('PAID')).toBeVisible();
 

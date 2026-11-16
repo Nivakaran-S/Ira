@@ -17,6 +17,8 @@ const EnvSchema = z.object({
   TRUST_PROXY: z.string().default('loopback,uniquelocal'),
   /** Online invoice payments. Defaults to the sandbox outside production and to none in it. */
   BILLING_GATEWAY: z.enum(['none', 'sandbox', 'payhere']).optional(),
+  /** Sandbox gateway only: settle after this many ms and deliver the webhook later, like a real provider. 0 settles at once. */
+  SANDBOX_WEBHOOK_DELAY_MS: z.coerce.number().int().min(0).max(60_000).default(0),
   PAYHERE_MERCHANT_ID: z.string().trim().min(1).optional(),
   PAYHERE_MERCHANT_SECRET: z.string().trim().min(1).optional(),
   /** true: sandbox.payhere.lk (free test merchant). Defaults to true outside production. */

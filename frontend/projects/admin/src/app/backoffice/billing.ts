@@ -1,5 +1,5 @@
 import { HttpClient } from '@angular/common/http';
-import { ChangeDetectionStrategy, Component, inject, signal } from '@angular/core';
+import { ChangeDetectionStrategy, Component, DestroyRef, inject, signal } from '@angular/core';
 import { ActivatedRoute } from '@angular/router';
 import { formatMinor } from '@pos/shared';
 import { firstValueFrom } from 'rxjs';
@@ -99,6 +99,21 @@ export class BillingPage {
   protected readonly paying = signal(false);
   protected readonly keys = ['stores', 'devices', 'users', 'products'] as const;
   protected readonly data = apiResource({ loader: () => firstValueFrom(this.http.get<Billing>('/api/billing')) });
+  constructor() {
+    // Back from a gateway that confirms later: check for the confirmation every couple of seconds.
+    if (this.returned() !== 'submitted') return;
+    let tries = 0;
+    const timer = setInterval(() => {
+      const open = this.data.value()?.invoices.some((i) => i.status === 'DUE');
+      if (open === false) {
+        this.returned.set('success');
+        clearInterval(timer);
+      } else if (++tries >= 30) clearInterval(timer);
+      else this.data.reload();
+    }, 2000);
+    inject(DestroyRef).onDestroy(() => clearInterval(timer));
+  }
+
   /** Off to the gateway's hosted checkout; it sends the browser back here with ?payment=… */
   protected async pay(invoiceId: string) {
     this.paying.set(true);

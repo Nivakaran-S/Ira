@@ -12,6 +12,38 @@ export const SANDBOX_SIGNATURE_HEADER = 'x-sandbox-signature';
 export class SandboxGateway implements BillingGateway {
   readonly key = 'sandbox';
   private readonly secret = randomBytes(32);
+  /** Sessions waiting on the 3-D Secure code, per process like the signing secret. */
+  private readonly challenges = new Map<string, { brand: string; last4: string; tries: number }>();
+
+  constructor(readonly options: { webhookDelayMs: number } = { webhookDelayMs: 0 }) {}
+
+  startChallenge(session: string, brand: string, last4: string) {
+    this.challenges.set(session, { brand, last4, tries: 0 });
+  }
+  challenge(session: string) {
+    return this.challenges.get(session);
+  }
+  /** Counts a wrong code; the third one ends the challenge. */
+  failChallenge(session: string): 'retry' | 'locked' {
+    const c = this.challenges.get(session);
+    if (!c) return 'locked';
+    c.tries += 1;
+    if (c.tries >= 3) {
+      this.challenges.delete(session);
+      return 'locked';
+    }
+    return 'retry';
+  }
+  private readonly strikes = new Map<string, number>();
+  /** Counts a declined card on this checkout; returns how many so far. */
+  strike(session: string) {
+    const n = (this.strikes.get(session) ?? 0) + 1;
+    this.strikes.set(session, n);
+    return n;
+  }
+  endChallenge(session: string) {
+    this.challenges.delete(session);
+  }
 
   async createCheckout(input: CheckoutInput): Promise<CheckoutSession> {
     const sessionId = `sbx_${randomBytes(12).toString('hex')}`;

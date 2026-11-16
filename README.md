@@ -1,6 +1,10 @@
 # POS Platform
 
-Multi-tenant, zero-trust point-of-sale SaaS. Design: `docs/superpowers/specs/2026-11-02-pos-platform-design.md`.
+Multi-tenant, zero-trust point-of-sale SaaS for Sri Lankan retail, cafe/restaurant, grocery and pharmacy
+businesses, with an offline-capable till. Design: `docs/superpowers/specs/2026-11-02-pos-platform-design.md`.
+
+**Status:** every milestone in the design (1 to 7) and the extra Milestone 8 are built and on `main`. What is
+still untried against the real world is listed under [Known limits](#known-limits).
 
 ## Layout
 
@@ -24,7 +28,7 @@ Multi-tenant, zero-trust point-of-sale SaaS. Design: `docs/superpowers/specs/202
 | 5 Restaurant | Modifiers, tables and open orders, kitchen display, split bills, tips | `specs/2026-11-07-m5-restaurant.md` |
 | 6 Grocery and pharmacy | Weighed items, scale labels and scales, lots with expiry (FEFO, recall), prescriptions | `specs/2026-11-07-m6-grocery-pharmacy.md` |
 | 7 Business | Multi-store and store prices, purchasing, stock transfers, margin and stock insights, CSV, plans and billing | `specs/2026-11-07-m7-business.md` |
-| 8 Payments and offline | Online invoice payment (gateway interface, sandbox), card terminals through the bridge (interface, sandbox), offline shift open/close, refunds, voids, customers, points and store credit | `specs/2026-11-08-m8-payments-offline.md` |
+| 8 Payments and offline | Online invoice payment (gateway interface; a mock gateway that behaves like a card provider, and PayHere), card terminals through the bridge (interface, sandbox), offline shift open/close, refunds, voids, customers, points and store credit | `specs/2026-11-08-m8-payments-offline.md` |
 
 Features are switched on per tenant by modules (business type plus console overrides); the API refuses
 disabled modules and the apps hide them.
@@ -68,12 +72,47 @@ Real terminals are drivers implementing `CardTerminal` in `hardware-bridge/src/t
 
 The till works offline once it has synced: production builds (`npm run build -w frontend`) include a service
 worker for the app shell; in dev the app still needs the dev server. Billing runs daily at 02:00 (Colombo);
-super admins can run it at once from Console → Invoices. Owners pay invoices online under Plan and billing:
-outside production that goes to the sandbox gateway (`BILLING_GATEWAY=sandbox`, a test page with Pay and
-Decline). For PayHere set, in `backend/.env`: `BILLING_GATEWAY=payhere`, `PAYHERE_MERCHANT_ID`,
-`PAYHERE_MERCHANT_SECRET` (both from a free sandbox merchant account at sandbox.payhere.lk) and
-`PAYHERE_NOTIFY_URL=https://<public api host>/api/platform/billing/webhooks/payhere`; the notify URL must be
-reachable from the internet. `PAYHERE_SANDBOX=false` switches to live PayHere.
+super admins can run it at once from Console → Invoices.
+
+### Paying invoices online
+
+Owners pay under Plan and billing, on the gateway's hosted page; card details never reach this server and the
+outcome comes back as a signed webhook. Two gateways sit behind the `BillingGateway` interface
+(`backend/src/modules/platform/payments`):
+
+- **Mock gateway** (`BILLING_GATEWAY=sandbox`, the default outside production, refused in production). A
+  hosted card page that behaves like a real provider's: card validation, test cards, declines with reasons,
+  a 3-D Secure code step, three tries, Cancel, a signed webhook with retries. Use any future expiry, a 3-digit
+  security code (4 for Amex) and any name:
+
+  | Card | Result |
+  |---|---|
+  | `4242 4242 4242 4242`, `5555 5555 5555 4444`, `3782 822463 10005` | approved (Visa, Mastercard, Amex) |
+  | `4000 0025 0000 3155` | asks for a 3-D Secure code: `123456` |
+  | `4000 0000 0000 0002` | declined |
+  | `4000 0000 0000 9995` | insufficient funds |
+  | `4000 0000 0000 0069` / `0127` / `0119` | expired card / wrong security code / processing error |
+
+  `SANDBOX_WEBHOOK_DELAY_MS` (default 0) makes it act like production: the browser returns at once, the
+  webhook lands that many milliseconds later and is sent twice, and the billing page polls until the invoice
+  shows paid. Try `1500`.
+- **PayHere** (`BILLING_GATEWAY=payhere`): set `PAYHERE_MERCHANT_ID` and `PAYHERE_MERCHANT_SECRET` (both from a
+  free sandbox merchant account at sandbox.payhere.lk) and
+  `PAYHERE_NOTIFY_URL=https://<public api host>/api/platform/billing/webhooks/payhere`; the notify URL must be
+  reachable from the internet. `PAYHERE_SANDBOX=false` switches to live PayHere. Not yet run against a live
+  sandbox account.
+
+### Configuration (`backend/.env`)
+
+`npm run env:dev -w backend` writes the required values (database, Redis, JWT and PII keys). Optional ones:
+
+| Variable | Meaning |
+|---|---|
+| `BILLING_GATEWAY` | `none`, `sandbox` (default outside production) or `payhere` |
+| `SANDBOX_WEBHOOK_DELAY_MS` | Mock gateway only: deliver the webhook after this many ms (default 0) |
+| `PAYHERE_MERCHANT_ID`, `PAYHERE_MERCHANT_SECRET`, `PAYHERE_NOTIFY_URL`, `PAYHERE_SANDBOX` | PayHere, see above |
+| `PLATFORM_IP_ALLOWLIST` | Comma-separated IPs allowed to reach the platform console (empty: any) |
+| `TRUST_PROXY` | Express trust-proxy setting behind a reverse proxy |
 
 Optional TLS edge (Caddy, internal CA): `docker compose -f infra/docker-compose.yml --profile edge up -d caddy`.
 It forwards `/api` to :3000, `/pos/*` to :4201 and the rest to :4200; start the dev servers with
@@ -96,6 +135,19 @@ The E2E suite (`frontend/e2e`) uses the dev database with fresh slugs per run, c
 admin through the real CLI, and starts the API and both dev servers if they are not already running.
 First time only: `npm exec -w frontend -- playwright install chromium`. `npm run e2e` clears the Vite
 dependency cache first, because a stale prebuilt `@pos/shared` otherwise serves old exports.
+
+## Known limits
+
+- PayHere has not been run against a live sandbox account, and a chargeback after a paid invoice is audited, not reversed.
+- The card terminal has only the sandbox driver; no real terminal, printer or scale has been driven.
+- Restaurant orders (tables, kitchen, paying an order) still need the connection; the rest of the till works offline.
+- A shift opened offline that collides with one opened elsewhere on the same register can only be rejected.
+- New customers need a connection (their phone number would otherwise sit in the offline outbox in clear).
+- Down-sync has an accepted cursor race, and the till bundle carries zod (budget 900 kB).
+- No deployment setup yet: production hosting, TLS certificates for real domains and backups are not covered here.
+- Out of scope by design: native mobile apps, accounting and e-commerce integrations, database-per-tenant isolation.
+
+Per-milestone design notes, including their own limits, are in `docs/superpowers/specs/`.
 
 ## Security model in one paragraph
 
